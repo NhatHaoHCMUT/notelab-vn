@@ -1,0 +1,5698 @@
+/* =========================================================================
+       === SECTION: BLOCK RENDERERS & HẠ TẦNG KHỐI ĐẶC BIỆT (CIRCUIT / WAVE) ===
+       ========================================================================= */
+    const svgBlockCache = new Map();
+
+    // Mẫu dữ liệu mặc định khi bấm "Chèn sơ đồ mạch" hoặc "Chèn waveform"
+    const DEFAULT_CIRCUIT_TEMPLATE = JSON.stringify(
+      {
+        v: 1,
+        grid: 20,
+        parts: [
+          { id: 'V1', type: 'VAC', x: 100, y: 160, rot: 0, flip: false, label: 'VIN', value: '5Vpp 1kHz' },
+          { id: 'R1', type: 'R', x: 240, y: 80, rot: 0, flip: false, label: 'R1', value: '1k' },
+          { id: 'C1', type: 'C', x: 380, y: 160, rot: 90, flip: false, label: 'C1', value: '100nF' },
+          { id: 'G1', type: 'GND', x: 240, y: 280, rot: 0, flip: false, label: 'GND', value: '' },
+          { id: 'OUT1', type: 'OUT', x: 480, y: 80, rot: 0, flip: false, label: 'VOUT', value: '' }
+        ],
+        wires: [
+          { id: 'w1', points: [[100, 120], [100, 80], [200, 80]] },
+          { id: 'w2', points: [[280, 80], [380, 80], [480, 80]] },
+          { id: 'w3', points: [[380, 80], [380, 120]] },
+          { id: 'w4', points: [[100, 200], [100, 260], [240, 260], [380, 260], [380, 200]] },
+          { id: 'w5', points: [[240, 260], [240, 280]] }
+        ],
+        texts: [
+          { x: 80, y: 20, text: 'Mạch lọc thông thấp RC bậc 1' }
+        ]
+      },
+      null,
+      2
+    );
+
+    const DEFAULT_WAVE_TEMPLATE = [
+      'title: Chuyển trạng thái FSM điều khiển bộ nhớ',
+      'scale: 2',
+      'ticks: on',
+      'clk:    P.........',
+      'rst_n:  0.1.......',
+      'req:    0..1.0....',
+      'state:  x.=.=.=.=. [IDLE, READ, WAIT, DONE]',
+      '---',
+      'mem_rd: 0...1|.0..',
+      'dout:   z....=.z.. [0xA5]'
+    ].join('\n');
+
+    // Engine mặc định cho Waveform (sẽ được nâng cấp toàn diện ở Phần B)
+    /* =========================================================================
+       === SECTION: TRÌNH VẼ & SOẠN THẢO GIẢN ĐỒ XUNG (WAVEFORM ENGINE) ===
+       ========================================================================= */
+    const waveEngine = {
+      // 1. Phân tích cú pháp từng dòng trong khối ```wave
+      parse: function (code) {
+        const rawLines = String(code || '').replace(/\r\n/g, '\n').split('\n');
+        const result = {
+          title: '',
+          scale: 2,
+          ticks: true,
+          items: [],
+          errors: [],
+          rawLines: rawLines
+        };
+
+        const validWaveChars = /^[01xzpnPN=.|]+$/;
+
+        for (let i = 0; i < rawLines.length; i++) {
+          const lineNumber = i + 1;
+          const trimmed = rawLines[i].trim();
+
+          if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('#')) {
+            continue;
+          }
+
+          if (trimmed === '---') {
+            result.items.push({
+              type: 'sep',
+              lineIndex: i,
+              lineNumber: lineNumber
+            });
+            continue;
+          }
+
+          const colonIdx = trimmed.indexOf(':');
+          if (colonIdx === -1) {
+            result.errors.push({
+              lineIndex: i,
+              line: lineNumber,
+              raw: rawLines[i],
+              message: `Thiếu dấu ':' phân cách tên tín hiệu và chuỗi sóng.`
+            });
+            result.items.push({
+              type: 'error',
+              lineIndex: i,
+              lineNumber: lineNumber,
+              raw: rawLines[i],
+              message: `Thiếu dấu ':'`
+            });
+            continue;
+          }
+
+          const key = trimmed.slice(0, colonIdx).trim();
+          const val = trimmed.slice(colonIdx + 1).trim();
+          const lowerKey = key.toLowerCase();
+
+          if (lowerKey === 'title') {
+            result.title = val;
+            continue;
+          }
+
+          if (lowerKey === 'scale') {
+            const num = parseFloat(val);
+            if (isNaN(num) || num < 1 || num > 4) {
+              result.errors.push({
+                lineIndex: i,
+                line: lineNumber,
+                raw: rawLines[i],
+                message: `Giá trị scale "${val}" không hợp lệ (chỉ nhận từ 1 đến 4).`
+              });
+            } else {
+              result.scale = num;
+            }
+            continue;
+          }
+
+          if (lowerKey === 'ticks') {
+            const vLower = val.toLowerCase();
+            if (vLower === 'on' || vLower === 'true' || vLower === '1') {
+              result.ticks = true;
+            } else if (vLower === 'off' || vLower === 'false' || vLower === '0') {
+              result.ticks = false;
+            } else {
+              result.errors.push({
+                lineIndex: i,
+                line: lineNumber,
+                raw: rawLines[i],
+                message: `Giá trị ticks "${val}" không hợp lệ (chỉ nhận on hoặc off).`
+              });
+            }
+            continue;
+          }
+
+          if (!key) {
+            result.errors.push({
+              lineIndex: i,
+              line: lineNumber,
+              raw: rawLines[i],
+              message: `Tên tín hiệu không được để trống.`
+            });
+            continue;
+          }
+
+          // Tách chuỗi sóng và mảng nhãn dữ liệu [IDLE, RUN, DONE]
+          const match = val.match(/^(\S+)(?:\s*\[([^\]]*)\])?$/);
+          if (!match) {
+            result.errors.push({
+              lineIndex: i,
+              line: lineNumber,
+              raw: rawLines[i],
+              message: `Định dạng tín hiệu "${key}" sai cú pháp (VD đúng: state: x.=.=.. [IDLE, RUN]).`
+            });
+            result.items.push({
+              type: 'error',
+              lineIndex: i,
+              lineNumber: lineNumber,
+              name: key,
+              raw: rawLines[i],
+              message: `Sai định dạng chuỗi sóng / nhãn`
+            });
+            continue;
+          }
+
+          const waveStr = match[1];
+          const labelsRaw = match[2] !== undefined ? match[2] : '';
+
+          if (!validWaveChars.test(waveStr)) {
+            const badChar = waveStr.split('').find((ch) => !validWaveChars.test(ch)) || '?';
+            result.errors.push({
+              lineIndex: i,
+              line: lineNumber,
+              raw: rawLines[i],
+              message: `Tín hiệu "${key}" chứa ký tự sóng không hợp lệ '${badChar}' (chỉ dùng 0,1,x,z,p,n,P,N,=,.,|).`
+            });
+            result.items.push({
+              type: 'error',
+              lineIndex: i,
+              lineNumber: lineNumber,
+              name: key,
+              raw: rawLines[i],
+              message: `Ký tự không hợp lệ '${badChar}'`
+            });
+            continue;
+          }
+
+          const labels = labelsRaw
+            ? labelsRaw.split(',').map((s) => s.trim()).filter((_, idx, arr) => arr.length > 0)
+            : [];
+
+          result.items.push({
+            type: 'signal',
+            lineIndex: i,
+            lineNumber: lineNumber,
+            name: key,
+            wave: waveStr,
+            labels: labels
+          });
+        }
+
+        return result;
+      },
+
+      // 2. Giải mã chuỗi ký tự sóng của 1 tín hiệu thành mảng trạng thái từng chu kỳ
+      expandSignalCycles: function (waveStr, labels) {
+        const chars = String(waveStr || '').split('');
+        const cycles = [];
+        let prevState = '0';
+        let prevBusId = -1;
+        let busCounter = 0;
+
+        for (let i = 0; i < chars.length; i++) {
+          const ch = chars[i];
+          if (ch === '.') {
+            cycles.push({
+              rawChar: '.',
+              state: prevState,
+              isContinuation: true,
+              hasBreak: false,
+              busId: prevState === '=' ? prevBusId : -1,
+              busLabel: prevState === '=' ? (labels[prevBusId] ?? `D${prevBusId}`) : ''
+            });
+          } else if (ch === '|') {
+            cycles.push({
+              rawChar: '|',
+              state: prevState,
+              isContinuation: true,
+              hasBreak: true,
+              busId: prevState === '=' ? prevBusId : -1,
+              busLabel: prevState === '=' ? (labels[prevBusId] ?? `D${prevBusId}`) : ''
+            });
+          } else if (ch === '=') {
+            const currentBusId = busCounter++;
+            prevState = '=';
+            prevBusId = currentBusId;
+            cycles.push({
+              rawChar: '=',
+              state: '=',
+              isContinuation: false,
+              hasBreak: false,
+              busId: currentBusId,
+              busLabel: labels[currentBusId] !== undefined ? labels[currentBusId] : `D${currentBusId}`
+            });
+          } else {
+            prevState = ch;
+            prevBusId = -1;
+            cycles.push({
+              rawChar: ch,
+              state: ch,
+              isContinuation: false,
+              hasBreak: false,
+              busId: -1,
+              busLabel: ''
+            });
+          }
+        }
+        return cycles;
+      },
+
+      // 3. Vẽ đường sóng cho 1 tín hiệu (trả về chuỗi phần tử SVG)
+      renderSingleSignalSvg: function (sigItem, xStart, yRow, cycleWidth, waveHeight, interactive, uid) {
+        const cycles = this.expandSignalCycles(sigItem.wave, sigItem.labels);
+        const n = cycles.length;
+        if (n === 0) return '';
+
+        const yTop = yRow;
+        const yBot = yRow + waveHeight;
+        const yMid = yRow + waveHeight / 2;
+        const slew = Math.min(5, Math.max(2.5, cycleWidth * 0.11));
+
+        const parts = [];
+
+        // Gom các chu kỳ liên tiếp cùng mức (0, 1, x, z, hoặc cùng busId của =) thành các đoạn (spans)
+        const spans = [];
+        let idx = 0;
+        while (idx < n) {
+          const cur = cycles[idx];
+          if (['p', 'P', 'n', 'N'].includes(cur.state)) {
+            spans.push({
+              state: cur.state,
+              busId: -1,
+              busLabel: '',
+              startCycle: idx,
+              endCycle: idx + 1
+            });
+            idx++;
+          } else {
+            let endIdx = idx + 1;
+            while (
+              endIdx < n &&
+              cycles[endIdx].state === cur.state &&
+              (cur.state !== '=' || cycles[endIdx].busId === cur.busId)
+            ) {
+              endIdx++;
+            }
+            spans.push({
+              state: cur.state,
+              busId: cur.busId,
+              busLabel: cur.busLabel,
+              startCycle: idx,
+              endCycle: endIdx
+            });
+            idx = endIdx;
+          }
+        }
+
+        // Vẽ từng đoạn (span) với cạnh chuyển mức nghiêng nhẹ (slew)
+        for (let s = 0; s < spans.length; s++) {
+          const sp = spans[s];
+          const prevSp = s > 0 ? spans[s - 1] : null;
+          const nextSp = s < spans.length - 1 ? spans[s + 1] : null;
+          const x0 = xStart + sp.startCycle * cycleWidth;
+          const x1 = xStart + sp.endCycle * cycleWidth;
+          const hasLeftTransition = prevSp !== null;
+          const hasRightTransition = nextSp !== null;
+
+          if (sp.state === '0' || sp.state === '1') {
+            const yLevel = sp.state === '1' ? yTop : yBot;
+            const xLineStart = hasLeftTransition ? x0 + slew : x0;
+            let d = `M ${xLineStart} ${yLevel} L ${x1} ${yLevel}`;
+
+            if (hasLeftTransition) {
+              const prevState = prevSp.state;
+              let yPrev = yMid;
+              if (prevState === '1') yPrev = yTop;
+              else if (prevState === '0' || prevState === 'p' || prevState === 'P') yPrev = yBot;
+              else if (prevState === 'n' || prevState === 'N') yPrev = yTop;
+
+              d = `M ${x0} ${yPrev} L ${x0 + slew} ${yLevel} L ${x1} ${yLevel}`;
+            }
+            parts.push(`<path d="${d}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />`);
+          } else if (sp.state === 'z') {
+            const xLineStart = hasLeftTransition ? x0 + slew : x0;
+            if (hasLeftTransition) {
+              const prevState = prevSp.state;
+              const yPrev = prevState === '1' || prevState === 'n' || prevState === 'N' ? yTop : (prevState === '0' || prevState === 'p' || prevState === 'P' ? yBot : yMid);
+              parts.push(`<line x1="${x0}" y1="${yPrev}" x2="${x0 + slew}" y2="${yMid}" stroke="#f59e0b" stroke-width="1.8" />`);
+            }
+            parts.push(`<line x1="${xLineStart}" y1="${yMid}" x2="${x1}" y2="${yMid}" stroke="#f59e0b" stroke-width="1.8" stroke-dasharray="5 3" />`);
+          } else if (sp.state === 'x') {
+            const leftTip = hasLeftTransition ? x0 : x0;
+            const leftInner = hasLeftTransition ? x0 + slew : x0;
+            const rightInner = hasRightTransition ? x1 - slew : x1;
+            const polyPoints = [
+              `${leftTip},${yMid}`,
+              `${leftInner},${yTop}`,
+              `${rightInner},${yTop}`,
+              `${x1},${yMid}`,
+              `${rightInner},${yBot}`,
+              `${leftInner},${yBot}`
+            ].join(' ');
+            parts.push(`<polygon points="${polyPoints}" fill="url(#${uid}_hatch)" stroke="#ef4444" stroke-width="1.5" stroke-linejoin="round" />`);
+          } else if (sp.state === '=') {
+            const leftInner = hasLeftTransition ? x0 + slew : x0 + 2;
+            const rightInner = hasRightTransition ? x1 - slew : x1 - 2;
+            const polyPoints = [
+              `${x0},${yMid}`,
+              `${leftInner},${yTop}`,
+              `${rightInner},${yTop}`,
+              `${x1},${yMid}`,
+              `${rightInner},${yBot}`,
+              `${leftInner},${yBot}`
+            ].join(' ');
+            parts.push(
+              `<polygon points="${polyPoints}" fill="rgba(59, 130, 246, 0.14)" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" />`
+            );
+            if (sp.busLabel) {
+              const boxW = Math.max(0, rightInner - leftInner - 4);
+              const maxChars = Math.max(2, Math.floor(boxW / 7.2));
+              const displayLabel =
+                sp.busLabel.length > maxChars ? sp.busLabel.slice(0, maxChars - 1) + '…' : sp.busLabel;
+              parts.push(
+                `<text x="${(x0 + x1) / 2}" y="${yMid + 4}" text-anchor="middle" fill="currentColor" font-family="var(--font-code)" font-size="11.5" font-weight="700">${escapeHtml(displayLabel)}</text>`
+              );
+            }
+          } else if (['p', 'P', 'n', 'N'].includes(sp.state)) {
+            const xMid = x0 + cycleWidth / 2;
+            const isPos = sp.state === 'p' || sp.state === 'P';
+            const hasArrow = sp.state === 'P' || sp.state === 'N';
+
+            if (isPos) {
+              const clkPath = `M ${x0} ${yBot} L ${x0} ${yTop} L ${xMid} ${yTop} L ${xMid} ${yBot} L ${x1} ${yBot}`;
+              parts.push(`<path d="${clkPath}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" />`);
+              if (hasArrow) {
+                const ay = yMid - 2;
+                parts.push(`<polygon points="${x0},${ay - 4} ${x0 - 3.2},${ay + 3} ${x0 + 3.2},${ay + 3}" fill="currentColor" />`);
+              }
+            } else {
+              const clkPath = `M ${x0} ${yTop} L ${x0} ${yBot} L ${xMid} ${yBot} L ${xMid} ${yTop} L ${x1} ${yTop}`;
+              parts.push(`<path d="${clkPath}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" />`);
+              if (hasArrow) {
+                const ay = yMid + 2;
+                parts.push(`<polygon points="${x0},${ay + 4} ${x0 - 3.2},${ay - 3} ${x0 + 3.2},${ay - 3}" fill="currentColor" />`);
+              }
+            }
+          }
+        }
+
+        // Vẽ ký hiệu đoạn ngắt '|' (dấu gạch lượn đôi) và ô bấm tương tác
+        for (let c = 0; c < n; c++) {
+          const cx = xStart + c * cycleWidth;
+          if (cycles[c].hasBreak) {
+            const bx = cx + cycleWidth / 2;
+            parts.push(`
+              <g class="wave-break-mark">
+                <rect x="${bx - 4}" y="${yTop - 2}" width="8" height="${waveHeight + 4}" fill="var(--bg-editor)" />
+                <path d="M ${bx - 3} ${yTop - 3} Q ${bx - 6} ${yMid - 4}, ${bx - 3} ${yMid} Q ${bx} ${yMid + 4}, ${bx - 3} ${yBot + 3}" fill="none" stroke="currentColor" stroke-width="1.5" />
+                <path d="M ${bx + 3} ${yTop - 3} Q ${bx} ${yMid - 4}, ${bx + 3} ${yMid} Q ${bx + 6} ${yMid + 4}, ${bx + 3} ${yBot + 3}" fill="none" stroke="currentColor" stroke-width="1.5" />
+              </g>
+            `);
+          }
+
+          if (interactive) {
+            parts.push(`
+              <rect class="wave-cell-hit"
+                x="${cx}" y="${yTop - 5}"
+                width="${cycleWidth}" height="${waveHeight + 10}"
+                data-line-index="${sigItem.lineIndex}"
+                data-cycle-index="${c}"
+                data-raw-char="${escapeHtml(cycles[c].rawChar)}">
+                <title>Tín hiệu ${escapeHtml(sigItem.name)} · Chu kỳ #${c} (Hiện tại: '${escapeHtml(cycles[c].rawChar)}') — Bấm chuột trái để đổi 0→1→x→z→=→0, chuột phải để đặt '.'</title>
+              </rect>
+            `);
+          }
+        }
+
+        return parts.join('\n');
+      },
+
+      // 4. Kết xuất toàn bộ khối Waveform ra SVG tĩnh hoặc tương tác
+      renderStaticSvg: function (code, options = {}) {
+        const interactive = Boolean(options.interactive);
+        const allowPartialOnError = Boolean(options.allowPartialOnError);
+        const parsed = this.parse(code);
+
+        const validSignals = parsed.items.filter((it) => it.type === 'signal');
+        if (!allowPartialOnError && parsed.errors.length > 0 && validSignals.length === 0) {
+          throw {
+            line: parsed.errors[0].line,
+            message: parsed.errors[0].message
+          };
+        }
+
+        if (parsed.items.length === 0 && parsed.errors.length === 0) {
+          throw {
+            line: 1,
+            message: 'Khối waveform chưa có dữ liệu tín hiệu nào.'
+          };
+        }
+
+        const cycleWidth = Math.round(24 + parsed.scale * 14);
+        const maxCycles = Math.max(
+          1,
+          ...validSignals.map((s) => s.wave.length)
+        );
+        const maxNameChars = Math.max(
+          6,
+          ...parsed.items.map((it) => (it.name ? it.name.length : 4))
+        );
+
+        const labelColWidth = Math.min(200, Math.max(95, maxNameChars * 8.5 + 24));
+        const xWaveStart = labelColWidth;
+        const waveTotalWidth = maxCycles * cycleWidth;
+        const rightPad = 24;
+        const svgWidth = xWaveStart + waveTotalWidth + rightPad;
+
+        const titleHeight = parsed.title ? 30 : 8;
+        const ticksHeaderHeight = parsed.ticks ? 22 : 6;
+        const yBodyStart = titleHeight + ticksHeaderHeight;
+
+        const rowHeight = 36;
+        const sepHeight = 16;
+        const waveHeight = 22;
+
+        let currentY = yBodyStart;
+        const rowPositions = [];
+        for (const item of parsed.items) {
+          if (item.type === 'sep') {
+            rowPositions.push({ item, y: currentY, h: sepHeight });
+            currentY += sepHeight;
+          } else {
+            rowPositions.push({ item, y: currentY, h: rowHeight });
+            currentY += rowHeight;
+          }
+        }
+
+        const errorFooterHeight = !interactive && parsed.errors.length > 0 ? 28 : 0;
+        const svgHeight = Math.max(70, currentY + 12 + errorFooterHeight);
+        const uid = 'wv_' + Math.random().toString(36).substring(2, 8);
+
+        const svgElements = [];
+
+        // Định nghĩa mẫu gạch chéo (hatch pattern) cho vùng không xác định 'x'
+        svgElements.push(`
+          <defs>
+            <pattern id="${uid}_hatch" width="6" height="6" patternTransform="rotate(45 0 0)" patternUnits="userSpaceOnUse">
+              <rect width="6" height="6" fill="rgba(239, 68, 68, 0.14)" />
+              <line x1="0" y1="0" x2="0" y2="6" stroke="#ef4444" stroke-width="1.4" opacity="0.65" />
+            </pattern>
+          </defs>
+        `);
+
+        // Vẽ tiêu đề giản đồ xung
+        if (parsed.title) {
+          svgElements.push(
+            `<text x="${svgWidth / 2}" y="21" text-anchor="middle" fill="currentColor" font-size="14.5" font-weight="700">${escapeHtml(parsed.title)}</text>`
+          );
+        }
+
+        // Vẽ lưới dọc và số thứ tự chu kỳ (ticks)
+        if (parsed.ticks) {
+          for (let c = 0; c <= maxCycles; c++) {
+            const gx = xWaveStart + c * cycleWidth;
+            svgElements.push(
+              `<line x1="${gx}" y1="${yBodyStart - 4}" x2="${gx}" y2="${currentY}" stroke="currentColor" stroke-dasharray="2 3" opacity="0.2" />`
+            );
+            if (c < maxCycles) {
+              svgElements.push(
+                `<text x="${gx + cycleWidth / 2}" y="${yBodyStart - 8}" text-anchor="middle" fill="currentColor" opacity="0.6" font-family="var(--font-code)" font-size="11">${c}</text>`
+              );
+            }
+          }
+        }
+
+        // Vẽ từng hàng tín hiệu / đường phân nhóm / dòng lỗi
+        for (const pos of rowPositions) {
+          const { item, y } = pos;
+          if (item.type === 'sep') {
+            const sepY = y + sepHeight / 2;
+            svgElements.push(
+              `<line x1="12" y1="${sepY}" x2="${svgWidth - 12}" y2="${sepY}" stroke="currentColor" stroke-dasharray="5 4" opacity="0.4" />`
+            );
+          } else if (item.type === 'error') {
+            const errY = y + 6;
+            svgElements.push(`
+              <rect x="10" y="${errY}" width="${svgWidth - 20}" height="${rowHeight - 8}" rx="4" fill="rgba(239, 68, 68, 0.14)" stroke="#ef4444" stroke-width="1" />
+              <text x="18" y="${errY + 18}" fill="#ef4444" font-family="var(--font-code)" font-size="12" font-weight="700">
+                Dòng ${item.lineNumber} lỗi: ${escapeHtml(item.message)} (${escapeHtml(item.raw.trim().slice(0, 45))})
+              </text>
+            `);
+          } else if (item.type === 'signal') {
+            const yWaveTop = y + (rowHeight - waveHeight) / 2;
+            const yText = y + rowHeight / 2 + 4;
+            svgElements.push(
+              `<text x="${xWaveStart - 12}" y="${yText}" text-anchor="end" fill="currentColor" font-family="var(--font-code)" font-size="13" font-weight="700">${escapeHtml(item.name)}</text>`
+            );
+            svgElements.push(
+              this.renderSingleSignalSvg(item, xWaveStart, yWaveTop, cycleWidth, waveHeight, interactive, uid)
+            );
+          }
+        }
+
+        if (!interactive && parsed.errors.length > 0) {
+          const firstErr = parsed.errors[0];
+          svgElements.push(
+            `<text x="14" y="${svgHeight - 8}" fill="#ef4444" font-size="12" font-weight="700">Cảnh báo cú pháp (Dòng ${firstErr.line}): ${escapeHtml(firstErr.message)}</text>`
+          );
+        }
+
+        return `
+          <svg xmlns="[http://www.w3.org/2000/svg](http://www.w3.org/2000/svg)" viewBox="0 0 ${svgWidth} ${svgHeight}" width="100%" style="max-width:${svgWidth}px; user-select:none;">
+            ${svgElements.join('\n')}
+          </svg>
+        `;
+      },
+
+      // 5. Thay đổi 1 chu kỳ khi người dùng bấm vào ô trên giản đồ xung
+      cycleCharacterAt: function (rawCode, lineIndex, cycleIndex, forceDot = false) {
+        const lines = String(rawCode || '').replace(/\r\n/g, '\n').split('\n');
+        if (lineIndex < 0 || lineIndex >= lines.length) return rawCode;
+
+        const line = lines[lineIndex];
+        const colonIdx = line.indexOf(':');
+        if (colonIdx === -1) return rawCode;
+
+        const namePart = line.slice(0, colonIdx + 1);
+        const restPart = line.slice(colonIdx + 1).trim();
+        const match = restPart.match(/^(\S+)(?:\s*\[([^\]]*)\])?$/);
+        if (!match) return rawCode;
+
+        const waveChars = match[1].split('');
+        if (cycleIndex < 0 || cycleIndex >= waveChars.length) return rawCode;
+
+        let labels = match[2] !== undefined && match[2].trim() !== ''
+          ? match[2].split(',').map((s) => s.trim())
+          : [];
+
+        const cycleOrder = ['0', '1', 'x', 'z', '='];
+        const currentChar = waveChars[cycleIndex];
+
+        let nextChar = '0';
+        if (forceDot) {
+          nextChar = currentChar === '.' ? '0' : '.';
+        } else {
+          const idx = cycleOrder.indexOf(currentChar);
+          nextChar = idx === -1 ? '0' : cycleOrder[(idx + 1) % cycleOrder.length];
+        }
+
+        waveChars[cycleIndex] = nextChar;
+        const newWaveStr = waveChars.join('');
+
+        // Đảm bảo nếu có ký tự '=' thì danh sách nhãn [...] có đủ nhãn hiển thị
+        const eqCount = waveChars.filter((c) => c === '=').length;
+        while (labels.length < eqCount) {
+          labels.push(`D${labels.length}`);
+        }
+
+        const labelSuffix = eqCount > 0 || match[2] !== undefined ? ` [${labels.join(', ')}]` : '';
+        lines[lineIndex] = `${namePart} ${newWaveStr}${labelSuffix}`;
+        return lines.join('\n');
+      },
+
+      // 6. Giao diện Modal Trình soạn thảo Waveform chia đôi
+      mountEditor: function (containerEl, initialCode, onChangeCallback, toolbarSlot) {
+        let clickToEditEnabled = true;
+
+        if (toolbarSlot) {
+          toolbarSlot.innerHTML = `
+            <label class="btn btn-sm active-toggle" id="lblWaveClickMode" style="cursor:pointer;">
+              <input type="checkbox" id="chkWaveClickToEdit" checked style="margin-right:4px;" />
+              Chế độ Bấm để chỉnh (0→1→x→z→=→0)
+            </label>
+            <button type="button" class="btn btn-sm" id="btnWaveAddSignal">+ Thêm tín hiệu</button>
+            <button type="button" class="btn btn-sm" id="btnWaveAddClock">+ Thêm Clock</button>
+            <button type="button" class="btn btn-sm" id="btnWaveAddBus">+ Thêm Bus</button>
+            <button type="button" class="btn btn-sm" id="btnWaveAddSep">+ Phân nhóm (---)</button>
+          `;
+        }
+
+        containerEl.innerHTML = `
+          <div class="wave-editor-layout">
+            <div class="wave-left-panel">
+              <div class="wave-panel-header">
+                <span>Danh sách tín hiệu (Thêm / Đổi tên / Di chuyển / Xóa)</span>
+              </div>
+              <div id="waveSignalListBox" class="wave-signal-manager"></div>
+              <div class="wave-panel-header">
+                <span>Mã nguồn Waveform</span>
+                <span style="font-weight:400; font-size:12px; color:var(--text-muted);">Tự động đồng bộ 2 chiều</span>
+              </div>
+              <textarea id="waveEditorTextarea" class="block-raw-textarea" spellcheck="false"></textarea>
+              <div class="wave-syntax-help">
+                <strong>Cú pháp:</strong> <code>0</code> thấp · <code>1</code> cao · <code>x</code> bất định · <code>z</code> trở kháng cao · <code>p/n/P/N</code> xung clock · <code>=</code> bus kèm <code>[nhãn1, nhãn2]</code> · <code>.</code> giữ nguyên · <code>|</code> đoạn ngắt · <code>---</code> phân nhóm.
+              </div>
+            </div>
+            <div class="wave-right-panel">
+              <div class="wave-panel-header">
+                <span>Xem trước tức thời & Chỉnh sửa trực tiếp trên xung</span>
+                <span id="waveCycleHintLabel" style="font-weight:400; font-size:12px; color:var(--accent);">
+                  Mẹo: Bấm chuột trái vào ô chu kỳ để đổi 0→1→x→z→=→0 | Chuột phải để đặt '.' (giữ mức)
+                </span>
+              </div>
+              <div id="wavePreviewStage" class="wave-preview-canvas"></div>
+            </div>
+          </div>
+        `;
+
+        const textarea = containerEl.querySelector('#waveEditorTextarea');
+        const sigListBox = containerEl.querySelector('#waveSignalListBox');
+        const previewStage = containerEl.querySelector('#wavePreviewStage');
+
+        textarea.value = initialCode;
+
+        const syncAll = (fromTextarea = true) => {
+          const code = textarea.value;
+          onChangeCallback(code);
+          const parsed = this.parse(code);
+
+          // Render danh sách quản lý tín hiệu
+          const editableItems = parsed.items;
+          if (editableItems.length === 0) {
+            sigListBox.innerHTML = `<div style="padding:10px; font-size:12.5px; color:var(--text-muted); text-align:center;">Chưa có tín hiệu nào. Hãy bấm "+ Thêm tín hiệu".</div>`;
+          } else {
+            sigListBox.innerHTML = editableItems
+              .map((it, idx) => {
+                if (it.type === 'sep') {
+                  return `
+                    <div class="wave-sig-row" data-line-index="${it.lineIndex}">
+                      <span class="wave-sig-name" style="color:var(--text-muted);">--- Đường phân nhóm ---</span>
+                      <div class="wave-sig-actions">
+                        <button type="button" class="wave-mini-btn" data-sig-act="up" data-idx="${idx}" title="Lên">↑</button>
+                        <button type="button" class="wave-mini-btn" data-sig-act="down" data-idx="${idx}" title="Xuống">↓</button>
+                        <button type="button" class="wave-mini-btn danger" data-sig-act="del" data-idx="${idx}" title="Xóa">×</button>
+                      </div>
+                    </div>
+                  `;
+                }
+                const isErr = it.type === 'error';
+                return `
+                  <div class="wave-sig-row ${isErr ? 'has-error' : ''}" data-line-index="${it.lineIndex}">
+                    <span class="wave-sig-name" title="Dòng ${it.lineNumber}">${escapeHtml(it.name || `Dòng ${it.lineNumber} (Lỗi)`)}</span>
+                    <div class="wave-sig-actions">
+                      ${!isErr ? `<button type="button" class="wave-mini-btn" data-sig-act="add-cycle" data-idx="${idx}" title="Thêm 1 chu kỳ (.)">+Chu kỳ</button>` : ''}
+                      ${!isErr ? `<button type="button" class="wave-mini-btn" data-sig-act="rename" data-idx="${idx}" title="Đổi tên tín hiệu">Đổi tên</button>` : ''}
+                      <button type="button" class="wave-mini-btn" data-sig-act="up" data-idx="${idx}" title="Di chuyển lên">↑</button>
+                      <button type="button" class="wave-mini-btn" data-sig-act="down" data-idx="${idx}" title="Di chuyển xuống">↓</button>
+                      <button type="button" class="wave-mini-btn danger" data-sig-act="del" data-idx="${idx}" title="Xóa dòng này">Xóa</button>
+                    </div>
+                  </div>
+                `;
+              })
+              .join('');
+          }
+
+          // Render SVG xem trước + khung báo dòng lỗi (nếu có)
+          let previewHtml = '';
+          try {
+            previewHtml = `
+              <div class="special-block-svg-wrap" style="border:1px solid var(--border-color); border-radius:6px; width:100%; justify-content:flex-start;">
+                ${this.renderStaticSvg(code, { interactive: clickToEditEnabled, allowPartialOnError: true })}
+              </div>
+            `;
+          } catch (err) {
+            previewHtml = '';
+          }
+
+          if (parsed.errors.length > 0) {
+            const errItems = parsed.errors
+              .map((e) => `<li><strong>Dòng ${e.line}:</strong> ${escapeHtml(e.message)}</li>`)
+              .join('');
+            previewHtml += `
+              <div class="wave-error-list">
+                <div style="font-weight:700; color:var(--danger); margin-bottom:4px;">Phát hiện ${parsed.errors.length} dòng lỗi cú pháp (các dòng hợp lệ vẫn được hiển thị ở trên):</div>
+                <ul style="padding-left:18px; margin:0;">${errItems}</ul>
+              </div>
+            `;
+          }
+
+          previewStage.innerHTML = previewHtml;
+        };
+
+        textarea.addEventListener('input', () => syncAll(true));
+
+        // Bấm chuột trái vào ô chu kỳ để chuyển vòng 0 → 1 → x → z → = → 0
+        previewStage.addEventListener('click', (e) => {
+          if (!clickToEditEnabled) return;
+          const hit = e.target.closest('.wave-cell-hit');
+          if (!hit) return;
+          const lineIdx = parseInt(hit.dataset.lineIndex, 10);
+          const cycleIdx = parseInt(hit.dataset.cycleIndex, 10);
+          textarea.value = this.cycleCharacterAt(textarea.value, lineIdx, cycleIdx, false);
+          syncAll(false);
+        });
+
+        // Bấm chuột phải vào ô chu kỳ để đặt/bỏ '.' (giữ trạng thái trước đó)
+        previewStage.addEventListener('contextmenu', (e) => {
+          if (!clickToEditEnabled) return;
+          const hit = e.target.closest('.wave-cell-hit');
+          if (!hit) return;
+          e.preventDefault();
+          const lineIdx = parseInt(hit.dataset.lineIndex, 10);
+          const cycleIdx = parseInt(hit.dataset.cycleIndex, 10);
+          textarea.value = this.cycleCharacterAt(textarea.value, lineIdx, cycleIdx, true);
+          syncAll(false);
+        });
+
+        // Quản lý tín hiệu: Đổi tên, Xóa, Di chuyển Lên/Xuống, Thêm chu kỳ
+        sigListBox.addEventListener('click', (e) => {
+          const btn = e.target.closest('[data-sig-act]');
+          if (!btn) return;
+          const act = btn.dataset.sigAct;
+          const itemIdx = parseInt(btn.dataset.idx, 10);
+          const parsed = this.parse(textarea.value);
+          const targetItem = parsed.items[itemIdx];
+          if (!targetItem) return;
+
+          const lines = parsed.rawLines;
+          const lineIndex = targetItem.lineIndex;
+
+          if (act === 'del') {
+            lines.splice(lineIndex, 1);
+            textarea.value = lines.join('\n');
+            syncAll(false);
+          } else if (act === 'rename') {
+            const newName = window.prompt('Nhập tên mới cho tín hiệu:', targetItem.name || '');
+            if (newName && newName.trim()) {
+              const cleanName = newName.trim().replace(/:/g, '');
+              const colonPos = lines[lineIndex].indexOf(':');
+              if (colonPos !== -1) {
+                lines[lineIndex] = cleanName + lines[lineIndex].slice(colonPos);
+                textarea.value = lines.join('\n');
+                syncAll(false);
+              }
+            }
+          } else if (act === 'add-cycle') {
+            const colonPos = lines[lineIndex].indexOf(':');
+            if (colonPos !== -1) {
+              const rest = lines[lineIndex].slice(colonPos + 1).trim();
+              const m = rest.match(/^(\S+)(\s*\[[^\]]*\])?$/);
+              if (m) {
+                lines[lineIndex] = `${lines[lineIndex].slice(0, colonPos + 1)} ${m[1]}.${m[2] || ''}`;
+                textarea.value = lines.join('\n');
+                syncAll(false);
+              }
+            }
+          } else if (act === 'up' && itemIdx > 0) {
+            const prevLineIdx = parsed.items[itemIdx - 1].lineIndex;
+            const tmp = lines[lineIndex];
+            lines[lineIndex] = lines[prevLineIdx];
+            lines[prevLineIdx] = tmp;
+            textarea.value = lines.join('\n');
+            syncAll(false);
+          } else if (act === 'down' && itemIdx < parsed.items.length - 1) {
+            const nextLineIdx = parsed.items[itemIdx + 1].lineIndex;
+            const tmp = lines[lineIndex];
+            lines[lineIndex] = lines[nextLineIdx];
+            lines[nextLineIdx] = tmp;
+            textarea.value = lines.join('\n');
+            syncAll(false);
+          }
+        });
+
+        // Các nút trên thanh công cụ Modal Waveform
+        if (toolbarSlot) {
+          const chkClick = toolbarSlot.querySelector('#chkWaveClickToEdit');
+          const lblClick = toolbarSlot.querySelector('#lblWaveClickMode');
+          chkClick.addEventListener('change', () => {
+            clickToEditEnabled = chkClick.checked;
+            lblClick.classList.toggle('active-toggle', clickToEditEnabled);
+            syncAll(false);
+          });
+
+          const appendSignalLine = (newLine) => {
+            const cur = textarea.value.replace(/\s+$/, '');
+            textarea.value = cur ? `${cur}\n${newLine}` : newLine;
+            syncAll(false);
+          };
+
+          toolbarSlot.querySelector('#btnWaveAddSignal').addEventListener('click', () => {
+            const parsed = this.parse(textarea.value);
+            const sigCount = parsed.items.filter((i) => i.type === 'signal').length + 1;
+            const len = Math.max(8, ...parsed.items.filter((i) => i.type === 'signal').map((s) => s.wave.length));
+            appendSignalLine(`sig${sigCount}: 0.1${'.'.repeat(Math.max(1, len - 3))}`);
+          });
+
+          toolbarSlot.querySelector('#btnWaveAddClock').addEventListener('click', () => {
+            const parsed = this.parse(textarea.value);
+            const len = Math.max(8, ...parsed.items.filter((i) => i.type === 'signal').map((s) => s.wave.length));
+            appendSignalLine(`clk: P${'.'.repeat(Math.max(1, len - 1))}`);
+          });
+
+          toolbarSlot.querySelector('#btnWaveAddBus').addEventListener('click', () => {
+            const parsed = this.parse(textarea.value);
+            const len = Math.max(8, ...parsed.items.filter((i) => i.type === 'signal').map((s) => s.wave.length));
+            const dots = '.'.repeat(Math.max(1, len - 6));
+            appendSignalLine(`data_bus: x.=.=.${dots} [D0, D1]`);
+          });
+
+          toolbarSlot.querySelector('#btnWaveAddSep').addEventListener('click', () => {
+            appendSignalLine(`---`);
+          });
+        }
+
+        syncAll(false);
+      }
+    };
+
+    // Engine mặc định cho Circuit (sẽ được nâng cấp toàn diện ở Phần C)
+    /* =========================================================================
+       === SECTION: TRÌNH VẼ & SOẠN THẢO SƠ ĐỒ MẠCH (CIRCUIT ENGINE) ===
+       ========================================================================= */
+    const CIRCUIT_LIBRARY = [
+      // 1. Linh kiện thụ động
+      { type: 'R', name: 'Điện trở R', cat: 'Thụ động', prefix: 'R', defVal: '10k' },
+      { type: 'C', name: 'Tụ điện C', cat: 'Thụ động', prefix: 'C', defVal: '100nF' },
+      { type: 'CP', name: 'Tụ phân cực', cat: 'Thụ động', prefix: 'C', defVal: '10uF' },
+      { type: 'L', name: 'Cuộn cảm L', cat: 'Thụ động', prefix: 'L', defVal: '10mH' },
+      { type: 'POT', name: 'Biến trở', cat: 'Thụ động', prefix: 'VR', defVal: '50k' },
+
+      // 2. Nguồn & Mass
+      { type: 'VDC', name: 'Nguồn áp DC', cat: 'Nguồn & Mass', prefix: 'V', defVal: '5V' },
+      { type: 'VAC', name: 'Nguồn áp AC', cat: 'Nguồn & Mass', prefix: 'V', defVal: '5Vpp 1kHz' },
+      { type: 'IDC', name: 'Nguồn dòng', cat: 'Nguồn & Mass', prefix: 'I', defVal: '10mA' },
+      { type: 'GND', name: 'Mass (GND)', cat: 'Nguồn & Mass', prefix: 'GND', defVal: '' },
+      { type: 'VCC', name: 'Nguồn VCC', cat: 'Nguồn & Mass', prefix: 'VCC', defVal: '+5V' },
+      { type: 'VDD', name: 'Nguồn VDD', cat: 'Nguồn & Mass', prefix: 'VDD', defVal: '+3.3V' },
+
+      // 3. Bán dẫn & Khuếch đại
+      { type: 'D', name: 'Diode', cat: 'Bán dẫn', prefix: 'D', defVal: '1N4148' },
+      { type: 'LED', name: 'LED', cat: 'Bán dẫn', prefix: 'LED', defVal: 'Đỏ' },
+      { type: 'ZENER', name: 'Diode Zener', cat: 'Bán dẫn', prefix: 'DZ', defVal: '5.1V' },
+      { type: 'NPN', name: 'BJT NPN', cat: 'Bán dẫn', prefix: 'Q', defVal: '2N2222' },
+      { type: 'PNP', name: 'BJT PNP', cat: 'Bán dẫn', prefix: 'Q', defVal: '2N2907' },
+      { type: 'NMOS', name: 'MOSFET N', cat: 'Bán dẫn', prefix: 'M', defVal: '2N7000' },
+      { type: 'PMOS', name: 'MOSFET P', cat: 'Bán dẫn', prefix: 'M', defVal: 'BS250' },
+      { type: 'OPAMP', name: 'Op-Amp', cat: 'Bán dẫn', prefix: 'U', defVal: 'LM358' },
+
+      // 4. Công tắc, Đèn, Cầu chì
+      { type: 'SW', name: 'Công tắc', cat: 'Đóng cắt & Tải', prefix: 'SW', defVal: '' },
+      { type: 'BTN', name: 'Nút nhấn', cat: 'Đóng cắt & Tải', prefix: 'BTN', defVal: '' },
+      { type: 'LAMP', name: 'Đèn báo', cat: 'Đóng cắt & Tải', prefix: 'LP', defVal: '12V' },
+      { type: 'FUSE', name: 'Cầu chì', cat: 'Đóng cắt & Tải', prefix: 'F', defVal: '1A' },
+
+      // 5. Cổng Logic (ANSI/IEEE)
+      { type: 'AND', name: 'Cổng AND', cat: 'Cổng Logic', prefix: 'U', defVal: '', inputs: 2 },
+      { type: 'OR', name: 'Cổng OR', cat: 'Cổng Logic', prefix: 'U', defVal: '', inputs: 2 },
+      { type: 'NOT', name: 'Cổng NOT', cat: 'Cổng Logic', prefix: 'U', defVal: '' },
+      { type: 'NAND', name: 'Cổng NAND', cat: 'Cổng Logic', prefix: 'U', defVal: '', inputs: 2 },
+      { type: 'NOR', name: 'Cổng NOR', cat: 'Cổng Logic', prefix: 'U', defVal: '', inputs: 2 },
+      { type: 'XOR', name: 'Cổng XOR', cat: 'Cổng Logic', prefix: 'U', defVal: '', inputs: 2 },
+      { type: 'XNOR', name: 'Cổng XNOR', cat: 'Cổng Logic', prefix: 'U', defVal: '', inputs: 2 },
+      { type: 'BUF', name: 'Buffer', cat: 'Cổng Logic', prefix: 'U', defVal: '' },
+
+      // 6. Khối số (MUX, DEMUX, Flip-Flop, Thanh ghi)
+      { type: 'MUX2', name: 'MUX 2:1', cat: 'Khối mạch số', prefix: 'U', defVal: 'MUX 2:1' },
+      { type: 'MUX4', name: 'MUX 4:1', cat: 'Khối mạch số', prefix: 'U', defVal: 'MUX 4:1' },
+      { type: 'DEMUX', name: 'DEMUX 1:2', cat: 'Khối mạch số', prefix: 'U', defVal: 'DEMUX' },
+      { type: 'DFF', name: 'D Flip-Flop', cat: 'Khối mạch số', prefix: 'FF', defVal: 'DFF' },
+      { type: 'REG', name: 'Khối đa dụng', cat: 'Khối mạch số', prefix: 'U', defVal: 'REG8', pinSpec: 'CLK,EN,D|Q,DONE' },
+
+      // 7. Port & Nhãn nối dây
+      { type: 'IN', name: 'Port Vào (IN)', cat: 'Port & Nhãn', prefix: 'IN', defVal: '' },
+      { type: 'OUT', name: 'Port Ra (OUT)', cat: 'Port & Nhãn', prefix: 'OUT', defVal: '' },
+      { type: 'NET', name: 'Nhãn dây (Net)', cat: 'Port & Nhãn', prefix: 'NET', defVal: '' }
+    ];
+
+    const circuitEngine = {
+      snap: function (val, grid = 20) {
+        return Math.round(val / grid) * grid;
+      },
+
+      // Chuẩn hóa & kiểm tra cú pháp JSON của khối ```circuit
+      parseAndNormalize: function (rawCode) {
+        const trimmed = String(rawCode || '').trim();
+        if (!trimmed) {
+          throw { line: 1, message: 'Khối circuit đang trống.' };
+        }
+        let parsed;
+        try {
+          parsed = JSON.parse(trimmed);
+        } catch (err) {
+          let lineNum = 1;
+          const posMatch = String(err.message).match(/position\s+(\d+)/i);
+          if (posMatch) {
+            const pos = parseInt(posMatch[1], 10);
+            lineNum = trimmed.slice(0, pos).split('\n').length;
+          }
+          throw { line: lineNum, message: 'Lỗi cú pháp JSON sơ đồ mạch: ' + err.message };
+        }
+
+        if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.parts) || !Array.isArray(parsed.wires)) {
+          throw { line: 1, message: 'JSON mạch phải có mảng "parts" và "wires".' };
+        }
+
+        const grid = Number(parsed.grid) || 20;
+        const parts = parsed.parts.map((p, idx) => ({
+          id: String(p.id || `P${idx + 1}`),
+          type: String(p.type || 'R').toUpperCase(),
+          x: this.snap(Number(p.x) || 100, grid),
+          y: this.snap(Number(p.y) || 100, grid),
+          rot: ((Number(p.rot) || 0) % 360 + 360) % 360,
+          flip: Boolean(p.flip),
+          label: String(p.label ?? p.id ?? ''),
+          value: String(p.value ?? ''),
+          inputs: Math.min(4, Math.max(2, Number(p.inputs) || 2)),
+          hasSet: Boolean(p.hasSet),
+          hasReset: Boolean(p.hasReset),
+          pinSpec: String(p.pinSpec || 'CLK,EN,D|Q,DONE')
+        }));
+
+        const wires = parsed.wires
+          .map((w, idx) => {
+            const pts = Array.isArray(w.points)
+              ? w.points
+                  .filter((pt) => Array.isArray(pt) && pt.length >= 2)
+                  .map((pt) => [this.snap(Number(pt[0]) || 0, grid), this.snap(Number(pt[1]) || 0, grid)])
+              : [];
+            return {
+              id: String(w.id || `w${idx + 1}`),
+              points: this.simplifyWirePoints(pts)
+            };
+          })
+          .filter((w) => w.points.length >= 2);
+
+        const texts = Array.isArray(parsed.texts)
+          ? parsed.texts.map((t, idx) => ({
+              id: String(t.id || `txt_${idx + 1}`),
+              x: this.snap(Number(t.x) || 100, grid),
+              y: this.snap(Number(t.y) || 100, grid),
+              text: String(t.text || '')
+            }))
+          : [];
+
+        return { v: Number(parsed.v) || 1, grid, parts, wires, texts };
+      },
+
+      // Rút gọn các điểm trùng hoặc thẳng hàng trên cùng một dây
+      simplifyWirePoints: function (points) {
+        if (!Array.isArray(points) || points.length === 0) return [];
+        const dedup = [points[0]];
+        for (let i = 1; i < points.length; i++) {
+          const prev = dedup[dedup.length - 1];
+          const cur = points[i];
+          if (prev[0] !== cur[0] || prev[1] !== cur[1]) {
+            dedup.push([cur[0], cur[1]]);
+          }
+        }
+        if (dedup.length <= 2) return dedup;
+        const result = [dedup[0]];
+        for (let i = 1; i < dedup.length - 1; i++) {
+          const a = result[result.length - 1];
+          const b = dedup[i];
+          const c = dedup[i + 1];
+          const collinearX = a[0] === b[0] && b[0] === c[0];
+          const collinearY = a[1] === b[1] && b[1] === c[1];
+          if (!collinearX && !collinearY) {
+            result.push(b);
+          }
+        }
+        result.push(dedup[dedup.length - 1]);
+        return result;
+      },
+
+      // Trả về danh sách chân tương đối (local pins) nằm đúng trên bội số lưới 20px
+      getLocalPins: function (part) {
+        const t = part.type;
+        if (['R', 'C', 'CP', 'L', 'D', 'LED', 'ZENER', 'SW', 'BTN', 'LAMP', 'FUSE', 'NOT', 'BUF'].includes(t)) {
+          return [
+            { id: '1', x: -40, y: 0, name: '1' },
+            { id: '2', x: 40, y: 0, name: '2' }
+          ];
+        }
+        if (t === 'POT') {
+          return [
+            { id: '1', x: -40, y: 0, name: '1' },
+            { id: '2', x: 40, y: 0, name: '2' },
+            { id: 'W', x: 0, y: -40, name: 'W' }
+          ];
+        }
+        if (['VDC', 'VAC', 'IDC'].includes(t)) {
+          return [
+            { id: '+', x: 0, y: -40, name: '+' },
+            { id: '-', x: 0, y: 40, name: '-' }
+          ];
+        }
+        if (['GND', 'VCC', 'VDD', 'IN', 'OUT', 'NET'].includes(t)) {
+          return [{ id: '1', x: 0, y: 0, name: '1' }];
+        }
+        if (['NPN', 'PNP'].includes(t)) {
+          return [
+            { id: 'B', x: -40, y: 0, name: 'B' },
+            { id: 'C', x: 20, y: -40, name: 'C' },
+            { id: 'E', x: 20, y: 40, name: 'E' }
+          ];
+        }
+        if (['NMOS', 'PMOS'].includes(t)) {
+          return [
+            { id: 'G', x: -40, y: 0, name: 'G' },
+            { id: 'D', x: 20, y: -40, name: 'D' },
+            { id: 'S', x: 20, y: 40, name: 'S' }
+          ];
+        }
+        if (t === 'OPAMP') {
+          return [
+            { id: 'IN-', x: -40, y: -20, name: '-' },
+            { id: 'IN+', x: -40, y: 20, name: '+' },
+            { id: 'OUT', x: 40, y: 0, name: 'OUT' }
+          ];
+        }
+        if (['AND', 'NAND', 'OR', 'NOR', 'XOR', 'XNOR'].includes(t)) {
+          const nIn = Math.min(4, Math.max(2, Number(part.inputs) || 2));
+          const pins = [];
+          if (nIn === 2) {
+            pins.push({ id: 'I1', x: -40, y: -20, name: 'I1' }, { id: 'I2', x: -40, y: 20, name: 'I2' });
+          } else if (nIn === 3) {
+            pins.push(
+              { id: 'I1', x: -40, y: -20, name: 'I1' },
+              { id: 'I2', x: -40, y: 0, name: 'I2' },
+              { id: 'I3', x: -40, y: 20, name: 'I3' }
+            );
+          } else {
+            pins.push(
+              { id: 'I1', x: -40, y: -40, name: 'I1' },
+              { id: 'I2', x: -40, y: -20, name: 'I2' },
+              { id: 'I3', x: -40, y: 20, name: 'I3' },
+              { id: 'I4', x: -40, y: 40, name: 'I4' }
+            );
+          }
+          pins.push({ id: 'Y', x: 40, y: 0, name: 'Y' });
+          return pins;
+        }
+        if (t === 'MUX2') {
+          return [
+            { id: 'I0', x: -40, y: -20, name: '0' },
+            { id: 'I1', x: -40, y: 20, name: '1' },
+            { id: 'S', x: 0, y: 40, name: 'S' },
+            { id: 'Y', x: 40, y: 0, name: 'Y' }
+          ];
+        }
+        if (t === 'MUX4') {
+          return [
+            { id: 'I0', x: -40, y: -40, name: '0' },
+            { id: 'I1', x: -40, y: -20, name: '1' },
+            { id: 'I2', x: -40, y: 20, name: '2' },
+            { id: 'I3', x: -40, y: 40, name: '3' },
+            { id: 'S', x: 0, y: 60, name: 'S' },
+            { id: 'Y', x: 40, y: 0, name: 'Y' }
+          ];
+        }
+        if (t === 'DEMUX') {
+          return [
+            { id: 'IN', x: -40, y: 0, name: 'IN' },
+            { id: 'S', x: 0, y: 40, name: 'S' },
+            { id: 'Y0', x: 40, y: -20, name: '0' },
+            { id: 'Y1', x: 40, y: 20, name: '1' }
+          ];
+        }
+        if (t === 'DFF') {
+          const pins = [
+            { id: 'D', x: -60, y: -20, name: 'D' },
+            { id: 'CLK', x: -60, y: 20, name: 'CLK' },
+            { id: 'Q', x: 60, y: -20, name: 'Q' },
+            { id: 'QN', x: 60, y: 20, name: 'Q̄' }
+          ];
+          if (part.hasSet) pins.push({ id: 'SET', x: 0, y: -60, name: 'S' });
+          if (part.hasReset) pins.push({ id: 'RST', x: 0, y: 60, name: 'R' });
+          return pins;
+        }
+        if (t === 'REG') {
+          const rawSpec = String(part.pinSpec || 'CLK,EN,D|Q,DONE');
+          const sides = rawSpec.split('|');
+          const leftNames = (sides[0] || 'IN').split(',').map((s) => s.trim()).filter(Boolean);
+          const rightNames = (sides[1] || 'OUT').split(',').map((s) => s.trim()).filter(Boolean);
+          const maxRows = Math.max(leftNames.length, rightNames.length, 1);
+          const startY = -Math.floor((maxRows - 1) / 2) * 20;
+          const pins = [];
+          leftNames.forEach((nm, idx) => {
+            pins.push({ id: `L_${idx}`, x: -60, y: startY + idx * 20, name: nm, side: 'L' });
+          });
+          rightNames.forEach((nm, idx) => {
+            pins.push({ id: `R_${idx}`, x: 60, y: startY + idx * 20, name: nm, side: 'R' });
+          });
+          return pins;
+        }
+        // Fallback cho linh kiện tương lai (tương thích ngược/xuôi)
+        return [
+          { id: '1', x: -40, y: 0, name: '1' },
+          { id: '2', x: 40, y: 0, name: '2' }
+        ];
+      },
+
+      // Chuyển tọa độ chân cục bộ sang tọa độ lưới thế giới (World Grid Coordinates)
+      transformPoint: function (part, lx, ly) {
+        let x = part.flip ? -lx : lx;
+        let y = ly;
+        const rot = ((Number(part.rot) || 0) % 360 + 360) % 360;
+        let rx = x;
+        let ry = y;
+        if (rot === 90) {
+          rx = -y;
+          ry = x;
+        } else if (rot === 180) {
+          rx = -x;
+          ry = -y;
+        } else if (rot === 270) {
+          rx = y;
+          ry = -x;
+        }
+        return [Math.round(part.x + rx), Math.round(part.y + ry)];
+      },
+
+      getWorldPins: function (part) {
+        return this.getLocalPins(part).map((p) => {
+          const [wx, wy] = this.transformPoint(part, p.x, p.y);
+          return { ...p, wx, wy, partId: part.id };
+        });
+      },
+
+      // Vẽ ký hiệu chuẩn ANSI/IEEE cho từng loại linh kiện (trong hệ tọa độ cục bộ của linh kiện)
+      renderPartBodySvg: function (part) {
+        const t = part.type;
+        const stroke = 'stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"';
+
+        switch (t) {
+          case 'R':
+            return `<path d="M -40 0 L -24 0 L -20 -8 L -12 8 L -4 -8 L 4 8 L 12 -8 L 20 8 L 24 0 L 40 0" ${stroke} />`;
+          case 'C':
+            return `
+              <line x1="-40" y1="0" x2="-5" y2="0" ${stroke} />
+              <line x1="-5" y1="-14" x2="-5" y2="14" ${stroke} />
+              <line x1="5" y1="-14" x2="5" y2="14" ${stroke} />
+              <line x1="5" y1="0" x2="40" y2="0" ${stroke} />
+            `;
+          case 'CP':
+            return `
+              <line x1="-40" y1="0" x2="-5" y2="0" ${stroke} />
+              <line x1="-5" y1="-14" x2="-5" y2="14" ${stroke} />
+              <path d="M 7 -14 Q 1 0 7 14" ${stroke} />
+              <line x1="4" y1="0" x2="40" y2="0" ${stroke} />
+              <text x="-14" y="-8" fill="currentColor" font-size="11" font-weight="700">+</text>
+            `;
+          case 'L':
+            return `<path d="M -40 0 L -24 0 A 6 7 0 0 1 -12 0 A 6 7 0 0 1 0 0 A 6 7 0 0 1 12 0 A 6 7 0 0 1 24 0 L 40 0" ${stroke} />`;
+          case 'POT':
+            return `
+              <path d="M -40 0 L -24 0 L -20 -8 L -12 8 L -4 -8 L 4 8 L 12 -8 L 20 8 L 24 0 L 40 0" ${stroke} />
+              <line x1="0" y1="-40" x2="0" y2="-10" ${stroke} />
+              <polygon points="0,-9 -4,-16 4,-16" fill="currentColor" />
+            `;
+          case 'VDC':
+            return `
+              <line x1="0" y1="-40" x2="0" y2="-18" ${stroke} />
+              <line x1="0" y1="18" x2="0" y2="40" ${stroke} />
+              <circle cx="0" cy="0" r="18" ${stroke} />
+              <text x="0" y="-5" text-anchor="middle" fill="currentColor" font-size="13" font-weight="700">+</text>
+              <text x="0" y="13" text-anchor="middle" fill="currentColor" font-size="14" font-weight="700">−</text>
+            `;
+          case 'VAC':
+            return `
+              <line x1="0" y1="-40" x2="0" y2="-18" ${stroke} />
+              <line x1="0" y1="18" x2="0" y2="40" ${stroke} />
+              <circle cx="0" cy="0" r="18" ${stroke} />
+              <path d="M -10 0 Q -5 -10 0 0 T 10 0" ${stroke} />
+            `;
+          case 'IDC':
+            return `
+              <line x1="0" y1="-40" x2="0" y2="-18" ${stroke} />
+              <line x1="0" y1="18" x2="0" y2="40" ${stroke} />
+              <circle cx="0" cy="0" r="18" ${stroke} />
+              <line x1="0" y1="10" x2="0" y2="-8" ${stroke} />
+              <polygon points="0,-12 -4,-4 4,-4" fill="currentColor" />
+            `;
+          case 'GND':
+            return `
+              <line x1="0" y1="0" x2="0" y2="10" ${stroke} />
+              <line x1="-14" y1="10" x2="14" y2="10" ${stroke} />
+              <line x1="-9" y1="15" x2="9" y2="15" ${stroke} />
+              <line x1="-4" y1="20" x2="4" y2="20" ${stroke} />
+            `;
+          case 'VCC':
+          case 'VDD':
+            return `
+              <line x1="0" y1="0" x2="0" y2="-12" ${stroke} />
+              <line x1="-12" y1="-12" x2="12" y2="-12" ${stroke} />
+              <polygon points="0,-18 -5,-12 5,-12" fill="currentColor" />
+            `;
+          case 'D':
+          case 'LED':
+          case 'ZENER': {
+            let extra = '';
+            if (t === 'ZENER') {
+              extra = `<path d="M 5 -11 L 10 -11 L 10 11 L 15 11" ${stroke} />`;
+            } else {
+              extra = `<line x1="10" y1="-11" x2="10" y2="11" ${stroke} />`;
+            }
+            if (t === 'LED') {
+              extra += `
+                <line x1="-2" y1="-13" x2="6" y2="-21" ${stroke} />
+                <polygon points="8,-23 2,-20 5,-17" fill="currentColor" />
+                <line x1="6" y1="-11" x2="14" y2="-19" ${stroke} />
+                <polygon points="16,-21 10,-18 13,-15" fill="currentColor" />
+              `;
+            }
+            return `
+              <line x1="-40" y1="0" x2="-10" y2="0" ${stroke} />
+              <polygon points="-10,-11 -10,11 10,0" ${stroke} />
+              ${extra}
+              <line x1="10" y1="0" x2="40" y2="0" ${stroke} />
+            `;
+          }
+          case 'NPN':
+          case 'PNP': {
+            const arrow =
+              t === 'NPN'
+                ? `<polygon points="18,22 9,20 14,13" fill="currentColor" />`
+                : `<polygon points="-1,9 8,11 3,18" fill="currentColor" />`;
+            return `
+              <line x1="-40" y1="0" x2="-6" y2="0" ${stroke} />
+              <line x1="-6" y1="-16" x2="-6" y2="16" stroke="currentColor" stroke-width="2.4" />
+              <path d="M -6 -8 L 20 -24 L 20 -40" ${stroke} />
+              <path d="M -6 8 L 20 24 L 20 40" ${stroke} />
+              <circle cx="4" cy="0" r="22" stroke="currentColor" stroke-width="1.3" fill="none" opacity="0.65" />
+              ${arrow}
+            `;
+          }
+          case 'NMOS':
+          case 'PMOS': {
+            const gateArrow =
+              t === 'NMOS'
+                ? `<polygon points="-2,0 -8,-4 -8,4" fill="currentColor" />`
+                : `<polygon points="12,0 6,-4 6,4" fill="currentColor" />`;
+            return `
+              <line x1="-40" y1="0" x2="-12" y2="0" ${stroke} />
+              <line x1="-12" y1="-14" x2="-12" y2="14" ${stroke} />
+              <line x1="-5" y1="-16" x2="-5" y2="-8" stroke="currentColor" stroke-width="2.2" />
+              <line x1="-5" y1="-4" x2="-5" y2="4" stroke="currentColor" stroke-width="2.2" />
+              <line x1="-5" y1="8" x2="-5" y2="16" stroke="currentColor" stroke-width="2.2" />
+              <path d="M -5 -12 L 20 -12 L 20 -40" ${stroke} />
+              <path d="M -5 12 L 20 12 L 20 40" ${stroke} />
+              <path d="M -5 0 L 20 0 L 20 12" ${stroke} />
+              ${gateArrow}
+            `;
+          }
+          case 'OPAMP':
+            return `
+              <line x1="-40" y1="-20" x2="-24" y2="-20" ${stroke} />
+              <line x1="-40" y1="20" x2="-24" y2="20" ${stroke} />
+              <line x1="24" y1="0" x2="40" y2="0" ${stroke} />
+              <polygon points="-24,-32 -24,32 24,0" ${stroke} />
+              <text x="-16" y="-15" fill="currentColor" font-size="14" font-weight="700">−</text>
+              <text x="-16" y="24" fill="currentColor" font-size="13" font-weight="700">+</text>
+            `;
+          case 'SW':
+            return `
+              <line x1="-40" y1="0" x2="-14" y2="0" ${stroke} />
+              <circle cx="-12" cy="0" r="2.5" ${stroke} />
+              <line x1="-10" y1="-1" x2="12" y2="-13" ${stroke} />
+              <circle cx="12" cy="0" r="2.5" ${stroke} />
+              <line x1="14" y1="0" x2="40" y2="0" ${stroke} />
+            `;
+          case 'BTN':
+            return `
+              <line x1="-40" y1="0" x2="-12" y2="0" ${stroke} />
+              <circle cx="-10" cy="0" r="2.5" ${stroke} />
+              <circle cx="10" cy="0" r="2.5" ${stroke} />
+              <line x1="12" y1="0" x2="40" y2="0" ${stroke} />
+              <line x1="-14" y1="-9" x2="14" y2="-9" ${stroke} />
+              <line x1="0" y1="-9" x2="0" y2="-16" ${stroke} />
+            `;
+          case 'LAMP':
+            return `
+              <line x1="-40" y1="0" x2="-16" y2="0" ${stroke} />
+              <line x1="16" y1="0" x2="40" y2="0" ${stroke} />
+              <circle cx="0" cy="0" r="16" ${stroke} />
+              <line x1="-11" y1="-11" x2="11" y2="11" ${stroke} />
+              <line x1="-11" y1="11" x2="11" y2="-11" ${stroke} />
+            `;
+          case 'FUSE':
+            return `
+              <line x1="-40" y1="0" x2="40" y2="0" ${stroke} />
+              <rect x="-18" y="-8" width="36" height="16" ${stroke} />
+            `;
+          case 'NOT':
+          case 'BUF': {
+            const isNot = t === 'NOT';
+            return `
+              <line x1="-40" y1="0" x2="-18" y2="0" ${stroke} />
+              <polygon points="-18,-16 -18,16 ${isNot ? '12,0' : '18,0'}" ${stroke} />
+              ${isNot ? `<circle cx="16" cy="0" r="4" ${stroke} /><line x1="20" y1="0" x2="40" y2="0" ${stroke} />` : `<line x1="18" y1="0" x2="40" y2="0" ${stroke} />`}
+            `;
+          }
+          case 'AND':
+          case 'NAND':
+          case 'OR':
+          case 'NOR':
+          case 'XOR':
+          case 'XNOR': {
+            const isInv = ['NAND', 'NOR', 'XNOR'].includes(t);
+            const isAnd = t === 'AND' || t === 'NAND';
+            const isXor = t === 'XOR' || t === 'XNOR';
+            const pins = this.getLocalPins(part).filter((p) => p.id !== 'Y');
+            const maxAbsY = Math.max(24, ...pins.map((p) => Math.abs(p.y)));
+            let body = '';
+
+            if (isAnd) {
+              body = `
+                <path d="M -20 ${-maxAbsY} L 0 ${-maxAbsY} A ${maxAbsY} ${maxAbsY} 0 0 1 0 ${maxAbsY} L -20 ${maxAbsY} Z" ${stroke} />
+              `;
+              pins.forEach((p) => {
+                body += `<line x1="-40" y1="${p.y}" x2="-20" y2="${p.y}" ${stroke} />`;
+              });
+            } else {
+              body = `
+                <path d="M -22 ${-maxAbsY} Q -8 0 -22 ${maxAbsY} Q 8 ${maxAbsY} 22 0 Q 8 ${-maxAbsY} -22 ${-maxAbsY} Z" ${stroke} />
+              `;
+              if (isXor) {
+                body += `<path d="M -28 ${-maxAbsY} Q -14 0 -28 ${maxAbsY}" ${stroke} />`;
+              }
+              pins.forEach((p) => {
+                body += `<line x1="-40" y1="${p.y}" x2="-17" y2="${p.y}" ${stroke} />`;
+              });
+            }
+
+            const outX = isAnd ? maxAbsY : 22;
+            if (isInv) {
+              body += `
+                <circle cx="${outX + 4}" cy="0" r="4" ${stroke} />
+                <line x1="${outX + 8}" y1="0" x2="40" y2="0" ${stroke} />
+              `;
+            } else {
+              body += `<line x1="${outX}" y1="0" x2="40" y2="0" ${stroke} />`;
+            }
+            return body;
+          }
+          case 'MUX2':
+            return `
+              <polygon points="-20,-32 20,-18 20,18 -20,32" ${stroke} />
+              <line x1="-40" y1="-20" x2="-20" y2="-20" ${stroke} />
+              <line x1="-40" y1="20" x2="-20" y2="20" ${stroke} />
+              <line x1="0" y1="40" x2="0" y2="25" ${stroke} />
+              <line x1="20" y1="0" x2="40" y2="0" ${stroke} />
+              <text x="-13" y="-16" fill="currentColor" font-size="10" font-family="var(--font-code)">0</text>
+              <text x="-13" y="23" fill="currentColor" font-size="10" font-family="var(--font-code)">1</text>
+            `;
+          case 'MUX4':
+            return `
+              <polygon points="-20,-52 20,-34 20,34 -20,52" ${stroke} />
+              <line x1="-40" y1="-40" x2="-20" y2="-40" ${stroke} />
+              <line x1="-40" y1="-20" x2="-20" y2="-20" ${stroke} />
+              <line x1="-40" y1="20" x2="-20" y2="20" ${stroke} />
+              <line x1="-40" y1="40" x2="-20" y2="40" ${stroke} />
+              <line x1="0" y1="60" x2="0" y2="43" ${stroke} />
+              <line x1="20" y1="0" x2="40" y2="0" ${stroke} />
+              <text x="-13" y="-36" fill="currentColor" font-size="10" font-family="var(--font-code)">0</text>
+              <text x="-13" y="-16" fill="currentColor" font-size="10" font-family="var(--font-code)">1</text>
+              <text x="-13" y="23" fill="currentColor" font-size="10" font-family="var(--font-code)">2</text>
+              <text x="-13" y="43" fill="currentColor" font-size="10" font-family="var(--font-code)">3</text>
+            `;
+          case 'DEMUX':
+            return `
+              <polygon points="-20,-18 20,-32 20,32 -20,18" ${stroke} />
+              <line x1="-40" y1="0" x2="-20" y2="0" ${stroke} />
+              <line x1="0" y1="40" x2="0" y2="25" ${stroke} />
+              <line x1="20" y1="-20" x2="40" y2="-20" ${stroke} />
+              <line x1="20" y1="20" x2="40" y2="20" ${stroke} />
+              <text x="8" y="-16" fill="currentColor" font-size="10" font-family="var(--font-code)">0</text>
+              <text x="8" y="23" fill="currentColor" font-size="10" font-family="var(--font-code)">1</text>
+            `;
+          case 'DFF':
+            return `
+              <rect x="-40" y="-40" width="80" height="80" ${stroke} />
+              <line x1="-60" y1="-20" x2="-40" y2="-20" ${stroke} />
+              <line x1="-60" y1="20" x2="-40" y2="20" ${stroke} />
+              <polyline points="-40,14 -32,20 -40,26" ${stroke} />
+              <line x1="40" y1="-20" x2="60" y2="-20" ${stroke} />
+              <line x1="40" y1="20" x2="60" y2="20" ${stroke} />
+              <text x="-30" y="-16" fill="currentColor" font-size="11" font-weight="700">D</text>
+              <text x="-28" y="24" fill="currentColor" font-size="10">CLK</text>
+              <text x="24" y="-16" fill="currentColor" font-size="11" font-weight="700">Q</text>
+              <text x="22" y="24" fill="currentColor" font-size="11" font-weight="700">Q̄</text>
+              ${part.hasSet ? `<line x1="0" y1="-60" x2="0" y2="-40" ${stroke} /><text x="0" y="-28" text-anchor="middle" fill="currentColor" font-size="10">S</text>` : ''}
+              ${part.hasReset ? `<line x1="0" y1="40" x2="0" y2="60" ${stroke} /><text x="0" y="35" text-anchor="middle" fill="currentColor" font-size="10">R</text>` : ''}
+            `;
+          case 'REG': {
+            const pins = this.getLocalPins(part);
+            const maxAbsY = Math.max(30, ...pins.map((p) => Math.abs(p.y) + 16));
+            const pinSvg = pins
+              .map((p) => {
+                if (p.side === 'L') {
+                  return `
+                    <line x1="-60" y1="${p.y}" x2="-42" y2="${p.y}" ${stroke} />
+                    <text x="-37" y="${p.y + 3.5}" fill="currentColor" font-size="10" font-family="var(--font-code)">${escapeHtml(p.name)}</text>
+                  `;
+                }
+                return `
+                  <line x1="42" y1="${p.y}" x2="60" y2="${p.y}" ${stroke} />
+                  <text x="37" y="${p.y + 3.5}" text-anchor="end" fill="currentColor" font-size="10" font-family="var(--font-code)">${escapeHtml(p.name)}</text>
+                `;
+              })
+              .join('');
+            return `
+              <rect x="-42" y="${-maxAbsY}" width="84" height="${maxAbsY * 2}" ${stroke} />
+              ${pinSvg}
+            `;
+          }
+          case 'IN':
+            return `<polygon points="0,0 -10,-9 -38,-9 -38,9 -10,9" ${stroke} />`;
+          case 'OUT':
+            return `<polygon points="0,0 10,-9 38,-9 38,9 10,9" ${stroke} />`;
+          case 'NET':
+            return `
+              <circle cx="0" cy="0" r="3" fill="currentColor" />
+              <polyline points="0,0 8,-10 38,-10" ${stroke} />
+            `;
+          default:
+            return `
+              <rect x="-28" y="-16" width="56" height="32" ${stroke} />
+              <line x1="-40" y1="0" x2="-28" y2="0" ${stroke} />
+              <line x1="28" y1="0" x2="40" y2="0" ${stroke} />
+              <text x="0" y="4" text-anchor="middle" fill="currentColor" font-size="10">${escapeHtml(t)}</text>
+            `;
+        }
+      },
+
+      // Vị trí nhãn (label) và giá trị (value) cho từng linh kiện
+      renderPartLabelsSvg: function (part) {
+        const t = part.type;
+        const lbl = escapeHtml(part.label || '');
+        const val = escapeHtml(part.value || '');
+        if (t === 'GND') return '';
+        if (t === 'VCC' || t === 'VDD') {
+          return `<text x="0" y="-23" text-anchor="middle" fill="currentColor" font-size="11.5" font-weight="700">${lbl || escapeHtml(t)}${val ? ' (' + val + ')' : ''}</text>`;
+        }
+        if (t === 'IN') {
+          return `<text x="-21" y="4" text-anchor="middle" fill="currentColor" font-size="11" font-weight="700">${lbl || 'IN'}</text>`;
+        }
+        if (t === 'OUT') {
+          return `<text x="21" y="4" text-anchor="middle" fill="currentColor" font-size="11" font-weight="700">${lbl || 'OUT'}</text>`;
+        }
+        if (t === 'NET') {
+          return `<text x="22" y="-14" text-anchor="middle" fill="var(--accent)" font-size="11.5" font-weight="700">${lbl || 'NET'}</text>`;
+        }
+        if (['VDC', 'VAC', 'IDC'].includes(t)) {
+          return `
+            ${lbl ? `<text x="24" y="-4" fill="currentColor" font-size="12" font-weight="700">${lbl}</text>` : ''}
+            ${val ? `<text x="24" y="12" fill="currentColor" opacity="0.82" font-size="11">${val}</text>` : ''}
+          `;
+        }
+        const yTop = t === 'DFF' || t === 'MUX4' || t === 'REG' ? -46 : -20;
+        const yBot = t === 'DFF' || t === 'MUX4' || t === 'REG' ? 56 : 26;
+        return `
+          ${lbl ? `<text x="0" y="${yTop}" text-anchor="middle" fill="currentColor" font-size="12" font-weight="700">${lbl}</text>` : ''}
+          ${val ? `<text x="0" y="${yBot}" text-anchor="middle" fill="currentColor" opacity="0.82" font-size="11">${val}</text>` : ''}
+        `;
+      },
+
+      // Tính toán các nút nối (chấm đen) và kiểm tra ERC (chân hở / thiếu GND)
+      analyzeConnectivityAndJunctions: function (circuit) {
+        const allPins = [];
+        for (const p of circuit.parts) {
+          allPins.push(...this.getWorldPins(p));
+        }
+
+        // Tách mỗi dây thành các đoạn thẳng ngang/dọc
+        const segments = [];
+        const wireVertices = new Map(); // key "x,y" -> count of wire vertex occurrences
+
+        for (const w of circuit.wires) {
+          const pts = w.points;
+          for (let i = 0; i < pts.length; i++) {
+            const k = `${pts[i][0]},${pts[i][1]}`;
+            wireVertices.set(k, (wireVertices.get(k) || 0) + 1);
+          }
+          for (let i = 0; i < pts.length - 1; i++) {
+            const [x1, y1] = pts[i];
+            const [x2, y2] = pts[i + 1];
+            segments.push({ wireId: w.id, segIdx: i, x1, y1, x2, y2 });
+          }
+        }
+
+        const isPointStrictlyInsideSegment = (px, py, seg) => {
+          if (seg.x1 === seg.x2 && px === seg.x1) {
+            const minY = Math.min(seg.y1, seg.y2);
+            const maxY = Math.max(seg.y1, seg.y2);
+            return py > minY && py < maxY;
+          }
+          if (seg.y1 === seg.y2 && py === seg.y1) {
+            const minX = Math.min(seg.x1, seg.x2);
+            const maxX = Math.max(seg.x1, seg.x2);
+            return px > minX && px < maxX;
+          }
+          return false;
+        };
+
+        const isPointOnSegmentInclusive = (px, py, seg) => {
+          if (seg.x1 === seg.x2 && px === seg.x1) {
+            const minY = Math.min(seg.y1, seg.y2);
+            const maxY = Math.max(seg.y1, seg.y2);
+            return py >= minY && py <= maxY;
+          }
+          if (seg.y1 === seg.y2 && py === seg.y1) {
+            const minX = Math.min(seg.x1, seg.x2);
+            const maxX = Math.max(seg.x1, seg.x2);
+            return px >= minX && px <= maxX;
+          }
+          return false;
+        };
+
+        // Đếm số nhánh dây phát xuất từ một điểm (x, y)
+        const countBranchesAt = (x, y) => {
+          let branches = 0;
+          for (const seg of segments) {
+            if (!isPointOnSegmentInclusive(x, y, seg)) continue;
+            if ((seg.x1 === x && seg.y1 === y) || (seg.x2 === x && seg.y2 === y)) {
+              branches += 1;
+            } else {
+              branches += 2;
+            }
+          }
+          return branches;
+        };
+
+        // Xác định tập hợp các tọa độ có chấm nối (Junction Dots)
+        // Quy tắc: chỉ tạo chấm nối khi có đầu mút dây hoặc chân linh kiện tại điểm giao có >= 3 nhánh
+        // (Hai đoạn thẳng cắt ngang qua nhau mà không có đầu mút tại giao điểm thì KHÔNG nối)
+        const junctionMap = new Map();
+        const candidateCoords = new Set();
+
+        for (const [k] of wireVertices.entries()) candidateCoords.add(k);
+        for (const pin of allPins) candidateCoords.add(`${pin.wx},${pin.wy}`);
+
+        for (const key of candidateCoords) {
+          const [x, y] = key.split(',').map(Number);
+          const branches = countBranchesAt(x, y);
+          const pinsHere = allPins.filter((p) => p.wx === x && p.wy === y).length;
+          if (branches >= 3 || (pinsHere >= 1 && branches >= 2) || pinsHere >= 2) {
+            junctionMap.set(key, [x, y]);
+          }
+        }
+
+        // Kiểm tra ERC (Electrical Rule Check): chân chưa nối & thiếu GND
+        const warnings = [];
+        const hasGnd = circuit.parts.some((p) => p.type === 'GND');
+        if (circuit.parts.length > 0 && !hasGnd) {
+          warnings.push('Sơ đồ chưa có điểm nối đất (Mass / GND).');
+        }
+
+        for (const pin of allPins) {
+          const part = circuit.parts.find((p) => p.id === pin.partId);
+          if (part && ['GND', 'VCC', 'VDD', 'NET', 'IN', 'OUT'].includes(part.type)) continue;
+
+          const connectedToWire = segments.some((seg) => isPointOnSegmentInclusive(pin.wx, pin.wy, seg));
+          const connectedToOtherPin = allPins.some(
+            (other) => (other.partId !== pin.partId || other.id !== pin.id) && other.wx === pin.wx && other.wy === pin.wy
+          );
+          if (!connectedToWire && !connectedToOtherPin) {
+            warnings.push(`Chân ${pin.name} của linh kiện "${part?.label || pin.partId}" tại (${pin.wx}, ${pin.wy}) chưa được nối dây.`);
+          }
+        }
+
+        return {
+          allPins,
+          junctions: Array.from(junctionMap.values()),
+          warnings
+        };
+      },
+
+      // Tự động tính khung nhìn vừa khít (Bounding Box) cho chế độ Xem trước
+      computeBounds: function (circuit) {
+        let minX = Infinity;
+        let minY = Infinity;
+        let maxX = -Infinity;
+        let maxY = -Infinity;
+
+        const expand = (x, y, pad = 45) => {
+          if (x - pad < minX) minX = x - pad;
+          if (y - pad < minY) minY = y - pad;
+          if (x + pad > maxX) maxX = x + pad;
+          if (y + pad > maxY) maxY = y + pad;
+        };
+
+        for (const p of circuit.parts) {
+          expand(p.x, p.y, 65);
+          for (const pin of this.getWorldPins(p)) {
+            expand(pin.wx, pin.wy, 25);
+          }
+        }
+        for (const w of circuit.wires) {
+          for (const [wx, wy] of w.points) {
+            expand(wx, wy, 20);
+          }
+        }
+        for (const t of circuit.texts) {
+          expand(t.x, t.y, 40);
+          expand(t.x + (t.text || '').length * 7, t.y, 25);
+        }
+
+        if (!isFinite(minX)) {
+          return { x: 0, y: 0, w: 500, h: 260 };
+        }
+        return {
+          x: Math.floor(minX),
+          y: Math.floor(minY),
+          w: Math.max(260, Math.ceil(maxX - minX)),
+          h: Math.max(150, Math.ceil(maxY - minY))
+        };
+      },
+
+      // Kết xuất các phần tử bên trong SVG (dùng chung cho cả Xem trước tĩnh và Canvas tương tác)
+      renderSceneInnerSvg: function (circuit, opts = {}) {
+        const selectedIds = opts.selectedIds || new Set();
+        const showPins = Boolean(opts.showPins);
+        const { allPins, junctions } = this.analyzeConnectivityAndJunctions(circuit);
+        const out = [];
+
+        // 1. Vẽ dây dẫn
+        for (const w of circuit.wires) {
+          const isSel = selectedIds.has(w.id);
+          const ptsAttr = w.points.map((pt) => `${pt[0]},${pt[1]}`).join(' ');
+          out.push(`
+            <g class="circuit-wire-group" data-wire-id="${escapeHtml(w.id)}">
+              <polyline points="${ptsAttr}" fill="none" stroke="transparent" stroke-width="12" style="cursor:pointer;" />
+              <polyline points="${ptsAttr}" fill="none" stroke="${isSel ? 'var(--accent)' : 'currentColor'}" stroke-width="${isSel ? '2.6' : '1.9'}" stroke-linecap="round" stroke-linejoin="round" />
+            </g>
+          `);
+        }
+
+        // 2. Vẽ các nút nối (Junction Dots)
+        for (const [jx, jy] of junctions) {
+          out.push(`<circle cx="${jx}" cy="${jy}" r="3.6" fill="currentColor" />`);
+        }
+
+        // 3. Vẽ linh kiện
+        for (const p of circuit.parts) {
+          const isSel = selectedIds.has(p.id);
+          const flipScale = p.flip ? ' scale(-1, 1)' : '';
+          const transform = `translate(${p.x}, ${p.y}) rotate(${p.rot || 0})${flipScale}`;
+          out.push(`
+            <g class="circuit-part-group ${isSel ? 'circuit-selected-halo' : ''}" data-part-id="${escapeHtml(p.id)}" transform="translate(${p.x}, ${p.y})" style="cursor:move;">
+              ${isSel ? `<rect x="-46" y="-46" width="92" height="92" rx="6" fill="rgba(37, 99, 235, 0.08)" stroke="var(--accent)" stroke-dasharray="4 3" stroke-width="1.2" />` : ''}
+              <g transform="rotate(${p.rot || 0})${flipScale}">
+                ${this.renderPartBodySvg(p)}
+              </g>
+              ${this.renderPartLabelsSvg(p)}
+            </g>
+          `);
+        }
+
+        // 4. Vẽ văn bản tự do (Texts)
+        for (const t of circuit.texts) {
+          const isSel = selectedIds.has(t.id);
+          out.push(`
+            <g class="circuit-text-group" data-text-id="${escapeHtml(t.id)}" transform="translate(${t.x}, ${t.y})" style="cursor:move;">
+              ${isSel ? `<rect x="-4" y="-16" width="${Math.max(40, (t.text || '').length * 8 + 12)}" height="22" rx="4" fill="rgba(37, 99, 235, 0.1)" stroke="var(--accent)" stroke-dasharray="3 2" />` : ''}
+              <text x="0" y="0" fill="currentColor" font-size="13.5" font-weight="600">${escapeHtml(t.text)}</text>
+            </g>
+          `);
+        }
+
+        // 5. Vẽ điểm bắt dính chân linh kiện (khi đang ở trong Modal trình vẽ)
+        if (showPins) {
+          for (const pin of allPins) {
+            out.push(`
+              <circle class="circuit-pin-hit" cx="${pin.wx}" cy="${pin.wy}" r="6"
+                data-pin-x="${pin.wx}" data-pin-y="${pin.wy}" data-part-id="${escapeHtml(pin.partId)}" data-pin-id="${escapeHtml(pin.id)}">
+                <title>Chân ${escapeHtml(pin.name)} (${pin.wx}, ${pin.wy}) — Bấm để bắt đầu / kết thúc đi dây</title>
+              </circle>
+              <circle cx="${pin.wx}" cy="${pin.wy}" r="2.2" fill="var(--accent)" opacity="0.65" pointer-events="none" />
+            `);
+          }
+        }
+
+        return out.join('\n');
+      },
+
+      // Hàm kết xuất SVG tĩnh cho phần Xem trước của ghi chú (tự cắt vừa khung nội dung)
+      renderStaticSvg: function (rawCode) {
+        const circuit = this.parseAndNormalize(rawCode);
+        const bounds = this.computeBounds(circuit);
+        const sceneSvg = this.renderSceneInnerSvg(circuit, { showPins: false });
+        return `
+          <svg xmlns="[http://www.w3.org/2000/svg](http://www.w3.org/2000/svg)" viewBox="${bounds.x} ${bounds.y} ${bounds.w} ${bounds.h}" width="100%" style="max-width:${Math.min(820, bounds.w)}px; height:auto; user-select:none;">
+            ${sceneSvg}
+          </svg>
+        `;
+      },
+
+      // Khởi chạy Trình vẽ Sơ đồ mạch toàn màn hình trong Modal
+      mountEditor: function (containerEl, initialCode, onChangeCallback, toolbarSlot) {
+        let circuit;
+        try {
+          circuit = this.parseAndNormalize(initialCode);
+        } catch (err) {
+          circuit = this.parseAndNormalize(DEFAULT_CIRCUIT_TEMPLATE);
+        }
+
+        const grid = circuit.grid || 20;
+        const selectedIds = new Set();
+        let activeTool = 'select'; // 'select' | 'wire' | 'text' | 'place'
+        let placingPartType = null;
+
+        // Lịch sử Undo / Redo (tối đa 60 bước)
+        const history = [JSON.stringify(circuit)];
+        let historyIdx = 0;
+
+        // Khung nhìn Pan & Zoom
+        const initB = this.computeBounds(circuit);
+        let viewBox = { x: initB.x - 40, y: initB.y - 40, w: Math.max(760, initB.w + 80), h: Math.max(480, initB.h + 80) };
+        let isSpaceDown = false;
+        let dragState = null;
+        let activeWirePoints = null; // Mảng điểm khi đang vẽ dây
+        let mouseWorldPos = [100, 100];
+        let clipboardItems = null;
+        let hideErcPanel = false;
+
+        // Thanh công cụ trên cùng của Modal
+        if (toolbarSlot) {
+          toolbarSlot.innerHTML = `
+            <button type="button" class="btn btn-sm active-toggle" id="btnCirToolSelect" title="Công cụ Chọn & Di chuyển (V)">Chọn</button>
+            <button type="button" class="btn btn-sm" id="btnCirToolWire" title="Công cụ Vẽ dây vuông góc (W)">Vẽ dây (W)</button>
+            <button type="button" class="btn btn-sm" id="btnCirToolText" title="Thêm nhãn văn bản tự do (T)">+ Văn bản</button>
+            <span style="border-left:1px solid var(--border-color); height:18px; margin:0 2px;"></span>
+            <button type="button" class="btn btn-sm" id="btnCirUndo" title="Hoàn tác (Ctrl+Z)">Undo</button>
+            <button type="button" class="btn btn-sm" id="btnCirRedo" title="Làm lại (Ctrl+Y)">Redo</button>
+            <button type="button" class="btn btn-sm" id="btnCirRotate" title="Xoay 90° (Phím R)">Xoay (R)</button>
+            <button type="button" class="btn btn-sm" id="btnCirFlip" title="Lật ngang (Phím F)">Lật (F)</button>
+            <button type="button" class="btn btn-sm btn-danger" id="btnCirDelete" title="Xóa đối tượng đang chọn (Delete)">Xóa</button>
+            <span style="border-left:1px solid var(--border-color); height:18px; margin:0 2px;"></span>
+            <button type="button" class="btn btn-sm" id="btnCirZoomIn" title="Phóng to (+)">+</button>
+            <button type="button" class="btn btn-sm" id="btnCirZoomOut" title="Thu nhỏ (-)">−</button>
+            <button type="button" class="btn btn-sm" id="btnCirZoomFit" title="Căn vừa khung nhìn">Vừa khung</button>
+            <span style="border-left:1px solid var(--border-color); height:18px; margin:0 2px;"></span>
+            <button type="button" class="btn btn-sm" id="btnCirExportSvg">Xuất SVG</button>
+            <button type="button" class="btn btn-sm" id="btnCirExportPngWhite" title="Xuất PNG nền trắng">PNG (Trắng)</button>
+            <button type="button" class="btn btn-sm" id="btnCirExportPngTrans" title="Xuất PNG nền trong suốt">PNG (Trong)</button>
+            <button type="button" class="btn btn-sm" id="btnCirCopyJson" title="Sao chép JSON sơ đồ mạch">Chép JSON</button>
+          `;
+        }
+
+        // Xây dựng danh mục linh kiện bên trái theo nhóm
+        const categories = [];
+        for (const item of CIRCUIT_LIBRARY) {
+          if (!categories.includes(item.cat)) categories.push(item.cat);
+        }
+
+        const paletteHtml = categories
+          .map((cat) => {
+            const itemsHtml = CIRCUIT_LIBRARY.filter((i) => i.cat === cat)
+              .map((item) => {
+                const dummyPart = { type: item.type, x: 0, y: 0, rot: 0, flip: false, inputs: 2, pinSpec: item.pinSpec };
+                return `
+                  <div class="circuit-part-btn" draggable="true" data-part-type="${item.type}" title="Kéo thả vào vùng vẽ hoặc bấm để đặt ${escapeHtml(item.name)}">
+                    <svg viewBox="-48 -36 96 72">${this.renderPartBodySvg(dummyPart)}</svg>
+                    <span>${escapeHtml(item.name)}</span>
+                  </div>
+                `;
+              })
+              .join('');
+            return `
+              <div class="circuit-cat-title">${escapeHtml(cat)}</div>
+              <div class="circuit-palette-grid">${itemsHtml}</div>
+            `;
+          })
+          .join('');
+
+        containerEl.innerHTML = `
+          <div class="circuit-editor-layout">
+            <aside class="circuit-palette-pane">${paletteHtml}</aside>
+            <div class="circuit-canvas-pane" id="circuitCanvasWrap">
+              <svg id="circuitInteractiveSvg" class="circuit-svg-stage" xmlns="[http://www.w3.org/2000/svg](http://www.w3.org/2000/svg)"></svg>
+              <div id="circuitErcBox" class="circuit-erc-panel" style="display:none;"></div>
+              <div id="circuitStatusBar" class="circuit-status-bar">Lưới: 20px · Tọa độ: (100, 100)</div>
+            </div>
+            <aside class="circuit-props-pane" id="circuitPropsPane"></aside>
+          </div>
+        `;
+
+        const svgEl = containerEl.querySelector('#circuitInteractiveSvg');
+        const propsPane = containerEl.querySelector('#circuitPropsPane');
+        const ercBox = containerEl.querySelector('#circuitErcBox');
+        const statusBar = containerEl.querySelector('#circuitStatusBar');
+
+        const serializeCircuit = () =>
+          JSON.stringify(
+            {
+              v: circuit.v || 1,
+              grid: circuit.grid || 20,
+              parts: circuit.parts,
+              wires: circuit.wires,
+              texts: circuit.texts
+            },
+            null,
+            2
+          );
+
+        const pushHistory = () => {
+          const snapStr = serializeCircuit();
+          if (history[historyIdx] === snapStr) return;
+          history.splice(historyIdx + 1);
+          history.push(snapStr);
+          if (history.length > 60) history.shift();
+          historyIdx = history.length - 1;
+          onChangeCallback(snapStr);
+        };
+
+        const setTool = (tool, partType = null) => {
+          activeTool = tool;
+          placingPartType = partType;
+          activeWirePoints = null;
+          if (toolbarSlot) {
+            toolbarSlot.querySelector('#btnCirToolSelect').classList.toggle('active-toggle', tool === 'select');
+            toolbarSlot.querySelector('#btnCirToolWire').classList.toggle('active-toggle', tool === 'wire');
+            toolbarSlot.querySelector('#btnCirToolText').classList.toggle('active-toggle', tool === 'text');
+          }
+          containerEl.querySelectorAll('.circuit-part-btn').forEach((b) => {
+            b.classList.toggle('active', tool === 'place' && b.dataset.partType === partType);
+          });
+          svgEl.classList.toggle('wire-mode', tool === 'wire' || tool === 'place' || tool === 'text');
+          renderCanvas();
+        };
+
+        const clientToWorld = (clientX, clientY, snapToGrid = true) => {
+          const rect = svgEl.getBoundingClientRect();
+          if (rect.width === 0 || rect.height === 0) return [0, 0];
+          const wx = viewBox.x + ((clientX - rect.left) / rect.width) * viewBox.w;
+          const wy = viewBox.y + ((clientY - rect.top) / rect.height) * viewBox.h;
+          if (!snapToGrid) return [wx, wy];
+          return [this.snap(wx, grid), this.snap(wy, grid)];
+        };
+
+        const createNewPart = (type, wx, wy) => {
+          const meta = CIRCUIT_LIBRARY.find((m) => m.type === type) || { prefix: 'U', defVal: '' };
+          let idx = 1;
+          while (circuit.parts.some((p) => p.id === `${meta.prefix}${idx}`)) idx++;
+          const id = `${meta.prefix}${idx}`;
+          return {
+            id,
+            type,
+            x: this.snap(wx, grid),
+            y: this.snap(wy, grid),
+            rot: 0,
+            flip: false,
+            label: ['GND', 'VCC', 'VDD'].includes(type) ? type : id,
+            value: meta.defVal || '',
+            inputs: meta.inputs || 2,
+            hasSet: false,
+            hasReset: false,
+            pinSpec: meta.pinSpec || 'CLK,EN,D|Q,DONE'
+          };
+        };
+
+        // Render bảng thuộc tính bên phải (Inspector)
+        const renderPropsInspector = () => {
+          const selArr = Array.from(selectedIds);
+          if (selArr.length === 0) {
+            propsPane.innerHTML = `
+              <div style="font-weight:700; font-size:14px;">Thuộc tính đối tượng</div>
+              <div style="font-size:12.5px; color:var(--text-muted); line-height:1.5;">
+                Chưa chọn linh kiện nào.<br/><br/>
+                <strong>Hướng dẫn thao tác nhanh:</strong><br/>
+                • <strong>Kéo-thả</strong> linh kiện từ cột trái vào lưới.<br/>
+                • <strong>Bấm chân linh kiện</strong> (hoặc phím <code>W</code>) để vẽ dây vuông góc.<br/>
+                • <strong>Bấm đôi</strong> vào linh kiện để sửa nhanh nhãn/giá trị.<br/>
+                • <strong>Phím R:</strong> Xoay 90° · <strong>Phím F:</strong> Lật ngang.<br/>
+                • <strong>Ctrl+C / Ctrl+V / Ctrl+D:</strong> Sao chép, dán, nhân đôi.<br/>
+                • <strong>Ctrl+Z / Ctrl+Y:</strong> Undo / Redo (60 bước).<br/>
+                • <strong>Giữ Space + kéo chuột:</strong> Di chuyển mặt phẳng vẽ.
+              </div>
+            `;
+            return;
+          }
+
+          if (selArr.length === 1) {
+            const id = selArr[0];
+            const part = circuit.parts.find((p) => p.id === id);
+            const textObj = circuit.texts.find((t) => t.id === id);
+
+            if (part) {
+              const isGateWithInputs = ['AND', 'NAND', 'OR', 'NOR', 'XOR', 'XNOR'].includes(part.type);
+              const isDff = part.type === 'DFF';
+              const isReg = part.type === 'REG';
+
+              propsPane.innerHTML = `
+                <div style="font-weight:700; font-size:14px; border-bottom:1px solid var(--border-color); padding-bottom:6px;">
+                  Linh kiện: ${escapeHtml(part.type)} (${escapeHtml(part.id)})
+                </div>
+                <div class="circuit-prop-group">
+                  <label>Nhãn linh kiện (Label / Net Name):</label>
+                  <input type="text" id="propPartLabel" class="circuit-prop-input" value="${escapeHtml(part.label)}" />
+                </div>
+                <div class="circuit-prop-group">
+                  <label>Giá trị / Thông số (Value):</label>
+                  <input type="text" id="propPartValue" class="circuit-prop-input" value="${escapeHtml(part.value)}" placeholder="VD: 10k, 100nF, LM358..." />
+                </div>
+                <div class="circuit-prop-group">
+                  <label>Góc xoay (Rotation):</label>
+                  <select id="propPartRot" class="circuit-prop-input">
+                    <option value="0" ${part.rot === 0 ? 'selected' : ''}>0°</option>
+                    <option value="90" ${part.rot === 90 ? 'selected' : ''}>90°</option>
+                    <option value="180" ${part.rot === 180 ? 'selected' : ''}>180°</option>
+                    <option value="270" ${part.rot === 270 ? 'selected' : ''}>270°</option>
+                  </select>
+                </div>
+                <label style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer;">
+                  <input type="checkbox" id="propPartFlip" ${part.flip ? 'checked' : ''} /> Lật ngang (Flip)
+                </label>
+                ${
+                  isGateWithInputs
+                    ? `
+                  <div class="circuit-prop-group">
+                    <label>Số ngõ vào cổng logic (2 - 4):</label>
+                    <select id="propPartInputs" class="circuit-prop-input">
+                      <option value="2" ${part.inputs === 2 ? 'selected' : ''}>2 ngõ vào</option>
+                      <option value="3" ${part.inputs === 3 ? 'selected' : ''}>3 ngõ vào</option>
+                      <option value="4" ${part.inputs === 4 ? 'selected' : ''}>4 ngõ vào</option>
+                    </select>
+                  </div>
+                `
+                    : ''
+                }
+                ${
+                  isDff
+                    ? `
+                  <label style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer;">
+                    <input type="checkbox" id="propDffSet" ${part.hasSet ? 'checked' : ''} /> Có chân SET (S)
+                  </label>
+                  <label style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer;">
+                    <input type="checkbox" id="propDffReset" ${part.hasReset ? 'checked' : ''} /> Có chân RESET (R)
+                  </label>
+                `
+                    : ''
+                }
+                ${
+                  isReg
+                    ? `
+                  <div class="circuit-prop-group">
+                    <label>Chân Trái | Phải (phân cách dấu phẩy):</label>
+                    <input type="text" id="propRegPins" class="circuit-prop-input" value="${escapeHtml(part.pinSpec)}" />
+                  </div>
+                `
+                    : ''
+                }
+              `;
+
+              propsPane.querySelector('#propPartLabel').addEventListener('input', (e) => {
+                part.label = e.target.value;
+                pushHistory();
+                renderCanvas(false);
+              });
+              propsPane.querySelector('#propPartValue').addEventListener('input', (e) => {
+                part.value = e.target.value;
+                pushHistory();
+                renderCanvas(false);
+              });
+              propsPane.querySelector('#propPartRot').addEventListener('change', (e) => {
+                part.rot = parseInt(e.target.value, 10) || 0;
+                pushHistory();
+                renderCanvas(false);
+              });
+              propsPane.querySelector('#propPartFlip').addEventListener('change', (e) => {
+                part.flip = e.target.checked;
+                pushHistory();
+                renderCanvas(false);
+              });
+              if (isGateWithInputs) {
+                propsPane.querySelector('#propPartInputs').addEventListener('change', (e) => {
+                  part.inputs = parseInt(e.target.value, 10) || 2;
+                  pushHistory();
+                  renderCanvas(false);
+                });
+              }
+              if (isDff) {
+                propsPane.querySelector('#propDffSet').addEventListener('change', (e) => {
+                  part.hasSet = e.target.checked;
+                  pushHistory();
+                  renderCanvas(false);
+                });
+                propsPane.querySelector('#propDffReset').addEventListener('change', (e) => {
+                  part.hasReset = e.target.checked;
+                  pushHistory();
+                  renderCanvas(false);
+                });
+              }
+              if (isReg) {
+                propsPane.querySelector('#propRegPins').addEventListener('input', (e) => {
+                  part.pinSpec = e.target.value;
+                  pushHistory();
+                  renderCanvas(false);
+                });
+              }
+              return;
+            }
+
+            if (textObj) {
+              propsPane.innerHTML = `
+                <div style="font-weight:700; font-size:14px;">Nhãn văn bản tự do</div>
+                <div class="circuit-prop-group">
+                  <label>Nội dung văn bản:</label>
+                  <input type="text" id="propFreeText" class="circuit-prop-input" value="${escapeHtml(textObj.text)}" />
+                </div>
+              `;
+              propsPane.querySelector('#propFreeText').addEventListener('input', (e) => {
+                textObj.text = e.target.value;
+                pushHistory();
+                renderCanvas(false);
+              });
+              return;
+            }
+          }
+
+          propsPane.innerHTML = `
+            <div style="font-weight:700; font-size:14px;">Đang chọn ${selArr.length} đối tượng</div>
+            <p style="font-size:12.5px; color:var(--text-secondary);">Bạn có thể kéo di chuyển nhóm, xoay (R), lật (F), nhân đôi (Ctrl+D) hoặc xóa (Delete).</p>
+          `;
+        };
+
+        // Render mặt phẳng vẽ SVG + Lưới + ERC
+        const renderCanvas = (refreshInspector = true) => {
+          svgEl.setAttribute('viewBox', `${viewBox.x} ${viewBox.y} ${viewBox.w} ${viewBox.h}`);
+
+          let extraOverlay = '';
+          // Đường dây đang vẽ dở (Orthogonal routing preview)
+          if (activeWirePoints && activeWirePoints.length > 0) {
+            const lastPt = activeWirePoints[activeWirePoints.length - 1];
+            const [mx, my] = mouseWorldPos;
+            const previewPts = [...activeWirePoints];
+            if (mx !== lastPt[0] && my !== lastPt[1]) {
+              previewPts.push([mx, lastPt[1]], [mx, my]);
+            } else {
+              previewPts.push([mx, my]);
+            }
+            const ptsStr = previewPts.map((p) => `${p[0]},${p[1]}`).join(' ');
+            extraOverlay += `<polyline points="${ptsStr}" fill="none" stroke="var(--accent)" stroke-width="2" stroke-dasharray="5 3" pointer-events="none" />`;
+          }
+
+          // Khung kéo chọn nhiều (Marquee box)
+          if (dragState && dragState.mode === 'marquee') {
+            const rx = Math.min(dragState.startRaw[0], dragState.curRaw[0]);
+            const ry = Math.min(dragState.startRaw[1], dragState.curRaw[1]);
+            const rw = Math.abs(dragState.curRaw[0] - dragState.startRaw[0]);
+            const rh = Math.abs(dragState.curRaw[1] - dragState.startRaw[1]);
+            extraOverlay += `<rect x="${rx}" y="${ry}" width="${rw}" height="${rh}" fill="rgba(37, 99, 235, 0.12)" stroke="var(--accent)" stroke-dasharray="4 3" pointer-events="none" />`;
+          }
+
+          // Bóng mờ linh kiện khi đang ở chế độ đặt linh kiện
+          if (activeTool === 'place' && placingPartType) {
+            const ghost = createNewPart(placingPartType, mouseWorldPos[0], mouseWorldPos[1]);
+            extraOverlay += `
+              <g transform="translate(${ghost.x}, ${ghost.y})" opacity="0.55" pointer-events="none">
+                ${this.renderPartBodySvg(ghost)}
+              </g>
+            `;
+          }
+
+          const uid = 'cir_grid_pattern';
+          svgEl.innerHTML = `
+            <defs>
+              <pattern id="${uid}" width="${grid}" height="${grid}" patternUnits="userSpaceOnUse">
+                <circle cx="0" cy="0" r="1.1" fill="currentColor" opacity="0.22" />
+              </pattern>
+            </defs>
+            <rect x="${viewBox.x - 2000}" y="${viewBox.y - 2000}" width="${viewBox.w + 4000}" height="${viewBox.h + 4000}" fill="url(#${uid})" data-bg="1" />
+            ${this.renderSceneInnerSvg(circuit, { selectedIds, showPins: true })}
+            ${extraOverlay}
+          `;
+
+          // Hiển thị cảnh báo kiểm tra mạch (ERC)
+          const { warnings } = this.analyzeConnectivityAndJunctions(circuit);
+          if (!hideErcPanel && warnings.length > 0) {
+            ercBox.style.display = 'block';
+            ercBox.innerHTML = `
+              <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:4px;">
+                <strong style="color:var(--warning);">Kiểm tra sơ đồ (${warnings.length} lưu ý):</strong>
+                <button type="button" class="wave-mini-btn" id="btnCloseErcBox">Ẩn</button>
+              </div>
+              <ul style="padding-left:16px; margin:0; line-height:1.4;">
+                ${warnings.slice(0, 5).map((w) => `<li>${escapeHtml(w)}</li>`).join('')}
+              </ul>
+            `;
+            const closeBtn = ercBox.querySelector('#btnCloseErcBox');
+            if (closeBtn) {
+              closeBtn.addEventListener('click', () => {
+                hideErcPanel = true;
+                ercBox.style.display = 'none';
+              });
+            }
+          } else {
+            ercBox.style.display = 'none';
+          }
+
+          if (refreshInspector) renderPropsInspector();
+        };
+
+        // Di chuyển các đối tượng đang chọn một khoảng (dx, dy) và kéo các đầu dây gắn vào chân đi theo
+        const moveSelectedItemsBy = (dx, dy) => {
+          if (dx === 0 && dy === 0) return;
+          const movedPinCoords = new Set();
+
+          for (const p of circuit.parts) {
+            if (selectedIds.has(p.id)) {
+              for (const pin of this.getWorldPins(p)) {
+                movedPinCoords.add(`${pin.wx},${pin.wy}`);
+              }
+              p.x += dx;
+              p.y += dy;
+            }
+          }
+
+          for (const t of circuit.texts) {
+            if (selectedIds.has(t.id)) {
+              t.x += dx;
+              t.y += dy;
+            }
+          }
+
+          for (const w of circuit.wires) {
+            if (selectedIds.has(w.id)) {
+              w.points = w.points.map(([x, y]) => [x + dx, y + dy]);
+              continue;
+            }
+            // Nếu dây không được chọn nhưng đầu mút gắn vào chân linh kiện vừa di chuyển -> đi theo vuông góc
+            const pts = w.points;
+            if (pts.length >= 2) {
+              const firstKey = `${pts[0][0]},${pts[0][1]}`;
+              if (movedPinCoords.has(firstKey)) {
+                const nx = pts[0][0] + dx;
+                const ny = pts[0][1] + dy;
+                if (pts.length === 2) {
+                  pts.splice(1, 0, [nx, pts[1][1]]);
+                } else if (pts[0][0] === pts[1][0]) {
+                  pts[1][0] = nx;
+                } else if (pts[0][1] === pts[1][1]) {
+                  pts[1][1] = ny;
+                }
+                pts[0] = [nx, ny];
+              }
+              const lastIdx = pts.length - 1;
+              const lastKey = `${pts[lastIdx][0]},${pts[lastIdx][1]}`;
+              if (movedPinCoords.has(lastKey)) {
+                const nx = pts[lastIdx][0] + dx;
+                const ny = pts[lastIdx][1] + dy;
+                if (pts.length === 2) {
+                  pts.splice(1, 0, [pts[0][0], ny]);
+                } else if (pts[lastIdx][0] === pts[lastIdx - 1][0]) {
+                  pts[lastIdx - 1][0] = nx;
+                } else if (pts[lastIdx][1] === pts[lastIdx - 1][1]) {
+                  pts[lastIdx - 1][1] = ny;
+                }
+                pts[lastIdx] = [nx, ny];
+              }
+              w.points = this.simplifyWirePoints(pts);
+            }
+          }
+        };
+
+        const finishDrawingWire = (finalPt) => {
+          if (!activeWirePoints || activeWirePoints.length === 0) return;
+          const lastPt = activeWirePoints[activeWirePoints.length - 1];
+          const [fx, fy] = finalPt;
+          if (fx !== lastPt[0] && fy !== lastPt[1]) {
+            activeWirePoints.push([fx, lastPt[1]], [fx, fy]);
+          } else if (fx !== lastPt[0] || fy !== lastPt[1]) {
+            activeWirePoints.push([fx, fy]);
+          }
+          const cleanPts = this.simplifyWirePoints(activeWirePoints);
+          if (cleanPts.length >= 2) {
+            circuit.wires.push({
+              id: generateId('w'),
+              points: cleanPts
+            });
+            pushHistory();
+          }
+          activeWirePoints = null;
+          renderCanvas();
+        };
+
+        // Sự kiện chuột trên vùng vẽ SVG
+        svgEl.addEventListener('mousedown', (e) => {
+          const [wx, wy] = clientToWorld(e.clientX, e.clientY, true);
+          const rawPt = clientToWorld(e.clientX, e.clientY, false);
+
+          // Kéo nền (Pan) bằng chuột giữa hoặc giữ phím Space
+          if (e.button === 1 || isSpaceDown) {
+            e.preventDefault();
+            svgEl.classList.add('panning');
+            dragState = {
+              mode: 'pan',
+              startClient: [e.clientX, e.clientY],
+              startVb: { ...viewBox }
+            };
+            return;
+          }
+
+          if (e.button !== 0) return;
+
+          // Chế độ đặt linh kiện
+          if (activeTool === 'place' && placingPartType) {
+            const newPart = createNewPart(placingPartType, wx, wy);
+            circuit.parts.push(newPart);
+            selectedIds.clear();
+            selectedIds.add(newPart.id);
+            pushHistory();
+            setTool('select');
+            return;
+          }
+
+          // Chế độ thêm văn bản tự do
+          if (activeTool === 'text') {
+            const txt = window.prompt('Nhập nội dung ghi chú văn bản trên sơ đồ:', 'Ghi chú mạch');
+            if (txt && txt.trim()) {
+              const newT = { id: generateId('txt'), x: wx, y: wy, text: txt.trim() };
+              circuit.texts.push(newT);
+              selectedIds.clear();
+              selectedIds.add(newT.id);
+              pushHistory();
+            }
+            setTool('select');
+            return;
+          }
+
+          const pinEl = e.target.closest('.circuit-pin-hit');
+          // Bấm vào chân linh kiện hoặc đang ở công cụ Vẽ dây
+          if (pinEl || activeTool === 'wire') {
+            const targetPt = pinEl
+              ? [parseInt(pinEl.dataset.pinX, 10), parseInt(pinEl.dataset.pinY, 10)]
+              : [wx, wy];
+
+            if (!activeWirePoints) {
+              activeWirePoints = [targetPt];
+              renderCanvas(false);
+            } else {
+              if (pinEl) {
+                finishDrawingWire(targetPt);
+              } else {
+                const lastPt = activeWirePoints[activeWirePoints.length - 1];
+                if (targetPt[0] !== lastPt[0] && targetPt[1] !== lastPt[1]) {
+                  activeWirePoints.push([targetPt[0], lastPt[1]], [targetPt[0], targetPt[1]]);
+                } else {
+                  activeWirePoints.push(targetPt);
+                }
+                renderCanvas(false);
+              }
+            }
+            return;
+          }
+
+          // Kiểm tra bấm vào linh kiện, văn bản hoặc dây
+          const partGroup = e.target.closest('.circuit-part-group');
+          const textGroup = e.target.closest('.circuit-text-group');
+          const wireGroup = e.target.closest('.circuit-wire-group');
+
+          if (partGroup || textGroup) {
+            const itemId = partGroup ? partGroup.dataset.partId : textGroup.dataset.textId;
+            if (e.shiftKey) {
+              if (selectedIds.has(itemId)) selectedIds.delete(itemId);
+              else selectedIds.add(itemId);
+            } else if (!selectedIds.has(itemId)) {
+              selectedIds.clear();
+              selectedIds.add(itemId);
+            }
+            dragState = {
+              mode: 'move',
+              lastGridPt: [wx, wy],
+              moved: false
+            };
+            renderCanvas();
+            return;
+          }
+
+          if (wireGroup) {
+            const wireId = wireGroup.dataset.wireId;
+            if (!e.shiftKey) selectedIds.clear();
+            selectedIds.add(wireId);
+            const wireObj = circuit.wires.find((w) => w.id === wireId);
+            let segIndex = -1;
+            if (wireObj) {
+              for (let i = 0; i < wireObj.points.length - 1; i++) {
+                const [x1, y1] = wireObj.points[i];
+                const [x2, y2] = wireObj.points[i + 1];
+                const onSeg =
+                  (x1 === x2 && Math.abs(rawPt[0] - x1) <= 10 && rawPt[1] >= Math.min(y1, y2) - 6 && rawPt[1] <= Math.max(y1, y2) + 6) ||
+                  (y1 === y2 && Math.abs(rawPt[1] - y1) <= 10 && rawPt[0] >= Math.min(x1, x2) - 6 && rawPt[0] <= Math.max(x1, x2) + 6);
+                if (onSeg) {
+                  segIndex = i;
+                  break;
+                }
+              }
+            }
+            dragState = {
+              mode: 'wire-seg',
+              wireObj,
+              segIndex,
+              lastGridPt: [wx, wy],
+              moved: false
+            };
+            renderCanvas();
+            return;
+          }
+
+          // Bấm vào vùng trống -> Kéo khung chọn nhiều (Marquee)
+          if (!e.shiftKey) selectedIds.clear();
+          dragState = {
+            mode: 'marquee',
+            startRaw: rawPt,
+            curRaw: rawPt
+          };
+          renderCanvas();
+        });
+
+        svgEl.addEventListener('mousemove', (e) => {
+          const [wx, wy] = clientToWorld(e.clientX, e.clientY, true);
+          mouseWorldPos = [wx, wy];
+          statusBar.textContent = `Lưới: ${grid}px · Tọa độ: (${wx}, ${wy}) · Đối tượng: ${circuit.parts.length} linh kiện, ${circuit.wires.length} dây`;
+
+          if (activeWirePoints || activeTool === 'place') {
+            renderCanvas(false);
+          }
+
+          if (!dragState) return;
+
+          if (dragState.mode === 'pan') {
+            const rect = svgEl.getBoundingClientRect();
+            const dx = ((e.clientX - dragState.startClient[0]) / rect.width) * dragState.startVb.w;
+            const dy = ((e.clientY - dragState.startClient[1]) / rect.height) * dragState.startVb.h;
+            viewBox.x = Math.round(dragState.startVb.x - dx);
+            viewBox.y = Math.round(dragState.startVb.y - dy);
+            svgEl.setAttribute('viewBox', `${viewBox.x} ${viewBox.y} ${viewBox.w} ${viewBox.h}`);
+            return;
+          }
+
+          if (dragState.mode === 'move') {
+            const dx = wx - dragState.lastGridPt[0];
+            const dy = wy - dragState.lastGridPt[1];
+            if (dx !== 0 || dy !== 0) {
+              moveSelectedItemsBy(dx, dy);
+              dragState.lastGridPt = [wx, wy];
+              dragState.moved = true;
+              renderCanvas(false);
+            }
+            return;
+          }
+
+          if (dragState.mode === 'wire-seg' && dragState.wireObj && dragState.segIndex >= 0) {
+            const pts = dragState.wireObj.points;
+            const i = dragState.segIndex;
+            if (i < pts.length - 1) {
+              const dx = wx - dragState.lastGridPt[0];
+              const dy = wy - dragState.lastGridPt[1];
+              if (pts[i][0] === pts[i + 1][0] && dx !== 0) {
+                pts[i][0] += dx;
+                pts[i + 1][0] += dx;
+                dragState.lastGridPt = [wx, wy];
+                dragState.moved = true;
+                renderCanvas(false);
+              } else if (pts[i][1] === pts[i + 1][1] && dy !== 0) {
+                pts[i][1] += dy;
+                pts[i + 1][1] += dy;
+                dragState.lastGridPt = [wx, wy];
+                dragState.moved = true;
+                renderCanvas(false);
+              }
+            }
+            return;
+          }
+
+          if (dragState.mode === 'marquee') {
+            dragState.curRaw = clientToWorld(e.clientX, e.clientY, false);
+            const minX = Math.min(dragState.startRaw[0], dragState.curRaw[0]);
+            const maxX = Math.max(dragState.startRaw[0], dragState.curRaw[0]);
+            const minY = Math.min(dragState.startRaw[1], dragState.curRaw[1]);
+            const maxY = Math.max(dragState.startRaw[1], dragState.curRaw[1]);
+
+            for (const p of circuit.parts) {
+              if (p.x >= minX && p.x <= maxX && p.y >= minY && p.y <= maxY) {
+                selectedIds.add(p.id);
+              }
+            }
+            for (const t of circuit.texts) {
+              if (t.x >= minX && t.x <= maxX && t.y >= minY && t.y <= maxY) {
+                selectedIds.add(t.id);
+              }
+            }
+            renderCanvas(false);
+          }
+        });
+
+        window.addEventListener('mouseup', () => {
+          if (!dragState) return;
+          svgEl.classList.remove('panning');
+          if (dragState.moved) {
+            if (dragState.mode === 'wire-seg' && dragState.wireObj) {
+              dragState.wireObj.points = this.simplifyWirePoints(dragState.wireObj.points);
+            }
+            pushHistory();
+          }
+          dragState = null;
+          renderCanvas();
+        });
+
+        // Bấm đôi: Kết thúc vẽ dây hoặc đổi nhanh nhãn/giá trị linh kiện
+        svgEl.addEventListener('dblclick', (e) => {
+          if (activeWirePoints) {
+            const [wx, wy] = clientToWorld(e.clientX, e.clientY, true);
+            finishDrawingWire([wx, wy]);
+            return;
+          }
+          const partGroup = e.target.closest('.circuit-part-group');
+          if (partGroup) {
+            const part = circuit.parts.find((p) => p.id === partGroup.dataset.partId);
+            if (!part) return;
+            const newLbl = window.prompt('Nhập nhãn (Label) cho linh kiện:', part.label || '');
+            if (newLbl !== null) part.label = newLbl.trim();
+            if (!['GND', 'IN', 'OUT', 'NET'].includes(part.type)) {
+              const newVal = window.prompt('Nhập giá trị (Value) cho linh kiện:', part.value || '');
+              if (newVal !== null) part.value = newVal.trim();
+            }
+            pushHistory();
+            renderCanvas();
+            return;
+          }
+          const textGroup = e.target.closest('.circuit-text-group');
+          if (textGroup) {
+            const textObj = circuit.texts.find((t) => t.id === textGroup.dataset.textId);
+            if (!textObj) return;
+            const newText = window.prompt('Sửa nội dung văn bản:', textObj.text || '');
+            if (newText !== null && newText.trim()) {
+              textObj.text = newText.trim();
+              pushHistory();
+              renderCanvas();
+            }
+          }
+        });
+
+        // Zoom bằng con lăn chuột
+        svgEl.addEventListener(
+          'wheel',
+          (e) => {
+            e.preventDefault();
+            const factor = e.deltaY < 0 ? 0.88 : 1.14;
+            const [mx, my] = clientToWorld(e.clientX, e.clientY, false);
+            const newW = Math.min(3600, Math.max(240, viewBox.w * factor));
+            const newH = Math.min(2600, Math.max(160, viewBox.h * factor));
+            viewBox.x = Math.round(mx - ((mx - viewBox.x) / viewBox.w) * newW);
+            viewBox.y = Math.round(my - ((my - viewBox.y) / viewBox.h) * newH);
+            viewBox.w = Math.round(newW);
+            viewBox.h = Math.round(newH);
+            svgEl.setAttribute('viewBox', `${viewBox.x} ${viewBox.y} ${viewBox.w} ${viewBox.h}`);
+          },
+          { passive: false }
+        );
+
+        // Hỗ trợ cảm ứng cơ bản (Touch drag & pinch zoom)
+        let touchLastDist = 0;
+        svgEl.addEventListener('touchstart', (e) => {
+          if (e.touches.length === 2) {
+            const dx = e.touches[0].clientX - e.touches[1].clientX;
+            const dy = e.touches[0].clientY - e.touches[1].clientY;
+            touchLastDist = Math.hypot(dx, dy);
+          }
+        });
+        svgEl.addEventListener('touchmove', (e) => {
+          if (e.touches.length === 2 && touchLastDist > 0) {
+            e.preventDefault();
+            const dx = e.touches[0].clientX - e.touches[1].clientX;
+            const dy = e.touches[0].clientY - e.touches[1].clientY;
+            const dist = Math.hypot(dx, dy);
+            const factor = touchLastDist / Math.max(10, dist);
+            viewBox.w = Math.min(3600, Math.max(240, Math.round(viewBox.w * factor)));
+            viewBox.h = Math.min(2600, Math.max(160, Math.round(viewBox.h * factor)));
+            touchLastDist = dist;
+            svgEl.setAttribute('viewBox', `${viewBox.x} ${viewBox.y} ${viewBox.w} ${viewBox.h}`);
+          }
+        });
+
+        // Kéo-thả linh kiện từ thanh bên trái vào Canvas
+        containerEl.querySelectorAll('.circuit-part-btn').forEach((btn) => {
+          btn.addEventListener('dragstart', (e) => {
+            e.dataTransfer.setData('text/plain', btn.dataset.partType);
+          });
+          btn.addEventListener('click', () => {
+            setTool('place', btn.dataset.partType);
+          });
+        });
+
+        svgEl.addEventListener('dragover', (e) => e.preventDefault());
+        svgEl.addEventListener('drop', (e) => {
+          e.preventDefault();
+          const type = e.dataTransfer.getData('text/plain');
+          if (!type) return;
+          const [wx, wy] = clientToWorld(e.clientX, e.clientY, true);
+          const newPart = createNewPart(type, wx, wy);
+          circuit.parts.push(newPart);
+          selectedIds.clear();
+          selectedIds.add(newPart.id);
+          pushHistory();
+          setTool('select');
+        });
+
+        // Các thao tác Xoay, Lật, Xóa, Undo, Redo, Copy, Paste, Duplicate
+        const rotateSelected = () => {
+          let changed = false;
+          for (const p of circuit.parts) {
+            if (selectedIds.has(p.id)) {
+              p.rot = ((p.rot || 0) + 90) % 360;
+              changed = true;
+            }
+          }
+          if (changed) {
+            pushHistory();
+            renderCanvas();
+          }
+        };
+
+        const flipSelected = () => {
+          let changed = false;
+          for (const p of circuit.parts) {
+            if (selectedIds.has(p.id)) {
+              p.flip = !p.flip;
+              changed = true;
+            }
+          }
+          if (changed) {
+            pushHistory();
+            renderCanvas();
+          }
+        };
+
+        const deleteSelected = () => {
+          if (selectedIds.size === 0) return;
+          circuit.parts = circuit.parts.filter((p) => !selectedIds.has(p.id));
+          circuit.wires = circuit.wires.filter((w) => !selectedIds.has(w.id));
+          circuit.texts = circuit.texts.filter((t) => !selectedIds.has(t.id));
+          selectedIds.clear();
+          pushHistory();
+          renderCanvas();
+        };
+
+        const doUndo = () => {
+          if (historyIdx > 0) {
+            historyIdx--;
+            circuit = this.parseAndNormalize(history[historyIdx]);
+            selectedIds.clear();
+            onChangeCallback(history[historyIdx]);
+            renderCanvas();
+          }
+        };
+
+        const doRedo = () => {
+          if (historyIdx < history.length - 1) {
+            historyIdx++;
+            circuit = this.parseAndNormalize(history[historyIdx]);
+            selectedIds.clear();
+            onChangeCallback(history[historyIdx]);
+            renderCanvas();
+          }
+        };
+
+        const copySelected = () => {
+          const parts = circuit.parts.filter((p) => selectedIds.has(p.id));
+          const texts = circuit.texts.filter((t) => selectedIds.has(t.id));
+          if (parts.length === 0 && texts.length === 0) return;
+          clipboardItems = JSON.parse(JSON.stringify({ parts, texts }));
+          showToast(`Đã sao chép ${parts.length + texts.length} đối tượng`);
+        };
+
+        const pasteClipboard = () => {
+          if (!clipboardItems) return;
+          selectedIds.clear();
+          for (const p of clipboardItems.parts || []) {
+            const copy = createNewPart(p.type, p.x + grid, p.y + grid);
+            copy.rot = p.rot;
+            copy.flip = p.flip;
+            copy.value = p.value;
+            copy.inputs = p.inputs;
+            copy.hasSet = p.hasSet;
+            copy.hasReset = p.hasReset;
+            copy.pinSpec = p.pinSpec;
+            circuit.parts.push(copy);
+            selectedIds.add(copy.id);
+          }
+          for (const t of clipboardItems.texts || []) {
+            const copyT = { id: generateId('txt'), x: t.x + grid, y: t.y + grid, text: t.text };
+            circuit.texts.push(copyT);
+            selectedIds.add(copyT.id);
+          }
+          pushHistory();
+          renderCanvas();
+        };
+
+        // Gắn sự kiện cho các nút trên thanh công cụ Modal
+        if (toolbarSlot) {
+          toolbarSlot.querySelector('#btnCirToolSelect').addEventListener('click', () => setTool('select'));
+          toolbarSlot.querySelector('#btnCirToolWire').addEventListener('click', () => setTool('wire'));
+          toolbarSlot.querySelector('#btnCirToolText').addEventListener('click', () => setTool('text'));
+          toolbarSlot.querySelector('#btnCirUndo').addEventListener('click', doUndo);
+          toolbarSlot.querySelector('#btnCirRedo').addEventListener('click', doRedo);
+          toolbarSlot.querySelector('#btnCirRotate').addEventListener('click', rotateSelected);
+          toolbarSlot.querySelector('#btnCirFlip').addEventListener('click', flipSelected);
+          toolbarSlot.querySelector('#btnCirDelete').addEventListener('click', deleteSelected);
+          toolbarSlot.querySelector('#btnCirZoomIn').addEventListener('click', () => {
+            viewBox.w = Math.max(240, Math.round(viewBox.w * 0.85));
+            viewBox.h = Math.max(160, Math.round(viewBox.h * 0.85));
+            renderCanvas(false);
+          });
+          toolbarSlot.querySelector('#btnCirZoomOut').addEventListener('click', () => {
+            viewBox.w = Math.min(3600, Math.round(viewBox.w * 1.18));
+            viewBox.h = Math.min(2600, Math.round(viewBox.h * 1.18));
+            renderCanvas(false);
+          });
+          toolbarSlot.querySelector('#btnCirZoomFit').addEventListener('click', () => {
+            const b = this.computeBounds(circuit);
+            viewBox = { x: b.x - 40, y: b.y - 40, w: Math.max(640, b.w + 80), h: Math.max(400, b.h + 80) };
+            renderCanvas(false);
+          });
+
+          const exportFromEditor = (fmt, bg) => {
+            const wrapper = document.createElement('div');
+            wrapper.innerHTML = this.renderStaticSvg(serializeCircuit());
+            exportBlockSvgElement(wrapper, 'circuit', 0, fmt, bg);
+          };
+          toolbarSlot.querySelector('#btnCirExportSvg').addEventListener('click', () => exportFromEditor('svg', 'transparent'));
+          toolbarSlot.querySelector('#btnCirExportPngWhite').addEventListener('click', () => exportFromEditor('png', 'white'));
+          toolbarSlot.querySelector('#btnCirExportPngTrans').addEventListener('click', () => exportFromEditor('png', 'transparent'));
+          toolbarSlot.querySelector('#btnCirCopyJson').addEventListener('click', async () => {
+            try {
+              await navigator.clipboard.writeText(serializeCircuit());
+              showToast('Đã sao chép JSON sơ đồ mạch vào Clipboard!', 'success');
+            } catch (err) {
+              showToast('Không thể truy cập Clipboard: ' + err.message, 'error');
+            }
+          });
+        }
+
+        // Phím tắt bên trong Modal vẽ mạch
+        const onModalKeyDown = (e) => {
+          if (!state.blockEditor.isOpen || state.blockEditor.blockType !== 'circuit') return;
+          const activeTag = document.activeElement ? document.activeElement.tagName : '';
+          if (['INPUT', 'TEXTAREA', 'SELECT'].includes(activeTag)) return;
+
+          if (e.code === 'Space') {
+            isSpaceDown = true;
+            return;
+          }
+
+          if (e.key === 'Escape' && (activeWirePoints || activeTool !== 'select')) {
+            e.preventDefault();
+            e.stopPropagation();
+            activeWirePoints = null;
+            setTool('select');
+            return;
+          }
+
+          const isMod = e.ctrlKey || e.metaKey;
+          if (isMod && e.key.toLowerCase() === 'z') {
+            e.preventDefault();
+            if (e.shiftKey) doRedo();
+            else doUndo();
+            return;
+          }
+          if (isMod && e.key.toLowerCase() === 'y') {
+            e.preventDefault();
+            doRedo();
+            return;
+          }
+          if (isMod && e.key.toLowerCase() === 'c') {
+            e.preventDefault();
+            copySelected();
+            return;
+          }
+          if (isMod && e.key.toLowerCase() === 'v') {
+            e.preventDefault();
+            pasteClipboard();
+            return;
+          }
+          if (isMod && e.key.toLowerCase() === 'd') {
+            e.preventDefault();
+            copySelected();
+            pasteClipboard();
+            return;
+          }
+
+          if (e.key.toLowerCase() === 'r') {
+            e.preventDefault();
+            rotateSelected();
+          } else if (e.key.toLowerCase() === 'f') {
+            e.preventDefault();
+            flipSelected();
+          } else if (e.key.toLowerCase() === 'w') {
+            e.preventDefault();
+            setTool('wire');
+          } else if (e.key.toLowerCase() === 'v') {
+            e.preventDefault();
+            setTool('select');
+          } else if (e.key === 'Delete' || e.key === 'Backspace') {
+            e.preventDefault();
+            deleteSelected();
+          } else if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
+            e.preventDefault();
+            const dx = e.key === 'ArrowLeft' ? -grid : e.key === 'ArrowRight' ? grid : 0;
+            const dy = e.key === 'ArrowUp' ? -grid : e.key === 'ArrowDown' ? grid : 0;
+            moveSelectedItemsBy(dx, dy);
+            pushHistory();
+            renderCanvas(false);
+          }
+        };
+
+        const onModalKeyUp = (e) => {
+          if (e.code === 'Space') isSpaceDown = false;
+        };
+
+        window.addEventListener('keydown', onModalKeyDown, true);
+        window.addEventListener('keyup', onModalKeyUp, true);
+
+        renderCanvas();
+      }
+    };
+
+    function mountFallbackSplitEditor(containerEl, initialCode, blockType, onChangeCallback) {
+      containerEl.innerHTML = `
+        <div class="block-editor-split">
+          <div class="block-editor-left">
+            <div style="padding:8px 12px; font-size:12.5px; font-weight:700; border-bottom:1px solid var(--border-color); color:var(--text-secondary);">
+              Mã nguồn khối (${blockType.toUpperCase()})
+            </div>
+            <textarea id="blockFallbackTextarea" class="block-raw-textarea" spellcheck="false"></textarea>
+          </div>
+          <div class="block-editor-right">
+            <div style="font-size:12.5px; font-weight:700; color:var(--text-muted); margin-bottom:10px; text-transform:uppercase;">
+              Xem trước trực tiếp
+            </div>
+            <div id="blockFallbackPreview" class="special-block-svg-wrap" style="border:1px solid var(--border-color); border-radius:6px; min-height:220px;"></div>
+          </div>
+        </div>
+      `;
+      const ta = containerEl.querySelector('#blockFallbackTextarea');
+      const prev = containerEl.querySelector('#blockFallbackPreview');
+      ta.value = initialCode;
+
+      const updatePreview = () => {
+        const val = ta.value;
+        onChangeCallback(val);
+        try {
+          const engine = blockType === 'wave' ? waveEngine : circuitEngine;
+          prev.innerHTML = engine.renderStaticSvg(val);
+        } catch (err) {
+          const lineInfo = err && err.line ? `Dòng ${err.line}: ` : '';
+          const msg = err && err.message ? err.message : String(err);
+          prev.innerHTML = `
+            <div class="special-block-error" style="width:100%;">
+              <div class="special-block-error-title">Lỗi cú pháp (${escapeHtml(blockType)})</div>
+              <div>${escapeHtml(lineInfo + msg)}</div>
+            </div>
+          `;
+        }
+      };
+
+      ta.addEventListener('input', updatePreview);
+      updatePreview();
+    }
+
+    function renderSpecialBlockWithCache(blockType, labelTitle, code, blockId) {
+      const rawCode = String(code || '');
+      const cacheKey = `${blockType}::${rawCode}`;
+      let bodyHtml = '';
+
+      if (svgBlockCache.has(cacheKey)) {
+        bodyHtml = svgBlockCache.get(cacheKey);
+      } else {
+        try {
+          const engine = blockType === 'wave' ? waveEngine : circuitEngine;
+          const svgMarkup = engine.renderStaticSvg(rawCode);
+          bodyHtml = `<div class="special-block-svg-wrap">${svgMarkup}</div>`;
+        } catch (err) {
+          const lineNum = err && err.line ? `Dòng ${err.line}: ` : '';
+          const errMsg = err && err.message ? err.message : String(err);
+          bodyHtml = `
+            <div class="special-block-error">
+              <div class="special-block-error-title">Lỗi cú pháp khối ${escapeHtml(blockType.toUpperCase())}</div>
+              <div>${escapeHtml(lineNum + errMsg)}</div>
+            </div>
+          `;
+        }
+        if (svgBlockCache.size > 150) {
+          const firstKey = svgBlockCache.keys().next().value;
+          svgBlockCache.delete(firstKey);
+        }
+        svgBlockCache.set(cacheKey, bodyHtml);
+      }
+
+      return `
+        <div class="special-block-card" data-block-type="${escapeHtml(blockType)}" data-block-id="${escapeHtml(blockId)}">
+          <div class="special-block-toolbar">
+            <div class="special-block-title">
+              <span class="special-block-type-tag">${escapeHtml(blockType)}</span>
+              <span>${escapeHtml(labelTitle)}</span>
+            </div>
+            <div class="special-block-actions">
+              <button type="button" class="btn btn-sm" data-block-action="edit" data-block-type="${escapeHtml(blockType)}" data-block-id="${escapeHtml(blockId)}">Chỉnh sửa</button>
+              <button type="button" class="btn btn-sm" data-block-action="export-svg" data-block-type="${escapeHtml(blockType)}" data-block-id="${escapeHtml(blockId)}">Xuất SVG</button>
+              <button type="button" class="btn btn-sm" data-block-action="export-png" data-block-type="${escapeHtml(blockType)}" data-block-id="${escapeHtml(blockId)}">Xuất PNG</button>
+            </div>
+          </div>
+          ${bodyHtml}
+        </div>
+      `;
+    }
+
+    const blockRenderers = {
+      circuit: function (code, blockId) {
+        return renderSpecialBlockWithCache('circuit', 'Sơ đồ mạch điện / mạch số', code, blockId);
+      },
+      wave: function (code, blockId) {
+        return renderSpecialBlockWithCache('wave', 'Giản đồ xung (Waveform)', code, blockId);
+      }
+    };
+
+    /* =========================================================================
+       === SECTION: CẤU HÌNH THƯ VIỆN & BIẾN TRẠNG THÁI TOÀN CỤC ===
+       ========================================================================= */
+    if (window.hljs) {
+      try {
+        hljs.registerAliases(['systemverilog', 'sv'], { languageName: 'verilog' });
+      } catch (err) {
+        console.warn('Không thể đăng ký alias SystemVerilog:', err);
+      }
+    }
+
+    if (window.marked) {
+      marked.setOptions({
+        gfm: true,
+        breaks: true
+      });
+    }
+
+    const DB_NAME = 'NoteLabVN_StudyDB_v1';
+    const DB_VERSION = 1;
+    const VERSION_INTERVAL_MS = 3 * 60 * 1000;
+    const MAX_VERSIONS_PER_NOTE = 10;
+    const BACKUP_REMINDER_MS = 7 * 24 * 60 * 60 * 1000;
+
+    const state = {
+      db: null,
+      notes: [],
+      activeNoteId: null,
+      filterType: 'all',
+      filterTag: null,
+      folders: [],
+      filterFolderId: null,
+      editingFolderId: null,
+      folderBusy: false,
+      searchQuery: '',
+      viewMode: 'split',
+      sidebarCollapsed: false,
+      noteListCollapsed: false,
+      noteFullWidth: false,
+      noteContentWidth: 860,
+      saveTimer: null,
+      activeObjectUrls: [],
+      pendingImportData: null,
+      activeVersions: [],
+      selectedVersionId: null,
+      flashcards: [],
+      fcQueue: [],
+      fcCurrentIndex: 0,
+      fcFlipped: false,
+      fcRememberedIds: new Set(),
+      fcForgotIds: new Set(),
+      fontSettings: null,
+      blockEditor: {
+        isOpen: false,
+        blockType: null,
+        blockIndex: -1,
+        initialCode: '',
+        currentCode: '',
+        dirty: false
+      }
+    };
+
+    /* =========================================================================
+       === SECTION: TIỆN ÍCH CHUNG (UTILITIES & TOAST) ===
+       ========================================================================= */
+    function escapeHtml(str) {
+      return String(str || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function escapeRegExp(str) {
+      return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+
+    function generateId(prefix = 'id') {
+      return `${prefix}_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+    }
+
+    function formatDateTime(ts) {
+      if (!ts) return '';
+      const d = new Date(ts);
+      const pad = (n) => String(n).padStart(2, '0');
+      return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    }
+
+    function showToast(message, type = 'info') {
+      const container = document.getElementById('toastContainer');
+      const el = document.createElement('div');
+      el.className = `toast ${type}`;
+      el.textContent = message;
+      container.appendChild(el);
+      setTimeout(() => {
+        el.style.opacity = '0';
+        el.style.transition = 'opacity 0.25s';
+        setTimeout(() => el.remove(), 260);
+      }, 3200);
+    }
+
+    function setSaveStatus(status) {
+      const badge = document.getElementById('saveStatusBadge');
+      badge.className = 'save-status ' + status;
+      if (status === 'saved') badge.textContent = 'Đã lưu';
+      else if (status === 'saving') badge.textContent = 'Đang lưu...';
+      else badge.textContent = 'Lỗi lưu';
+    }
+
+    /* =========================================================================
+       === SECTION: QUẢN LÝ ẨN/HIỆN CỘT & TÙY CHỈNH ĐỘ RỘNG TAKE NOTE ===
+       ========================================================================= */
+    function initLayoutPreferences() {
+      state.sidebarCollapsed = localStorage.getItem('notelab_sidebar_collapsed') === '1';
+      state.noteListCollapsed = localStorage.getItem('notelab_notelist_collapsed') === '1';
+      if (window.innerWidth <= 760) { state.sidebarCollapsed = true; state.noteListCollapsed = true; }
+      state.noteFullWidth = localStorage.getItem('notelab_note_fullwidth') === '1';
+
+      const savedWidth = parseInt(localStorage.getItem('notelab_note_width') || '860', 10);
+      if (!isNaN(savedWidth) && savedWidth >= 560 && savedWidth <= 1400) {
+        state.noteContentWidth = savedWidth;
+      }
+
+      const savedSidebarW = localStorage.getItem('notelab_sidebar_w');
+      if (savedSidebarW) document.documentElement.style.setProperty('--sidebar-width', savedSidebarW);
+
+      const savedListW = localStorage.getItem('notelab_notelist_w');
+      if (savedListW) document.documentElement.style.setProperty('--notelist-width', savedListW);
+
+      const savedSplitPct = localStorage.getItem('notelab_split_pct');
+      if (savedSplitPct) document.documentElement.style.setProperty('--split-left-percent', savedSplitPct);
+
+      applyPanelVisibility();
+      applyNoteContentWidth();
+    }
+
+    function applyPanelVisibility() {
+      const sidebar = document.getElementById('sidebarPane');
+      const resizerSidebar = document.getElementById('resizerSidebar');
+      const noteList = document.getElementById('noteListPane');
+      const resizerNoteList = document.getElementById('resizerNoteList');
+      const btnTabTop = document.getElementById('btnToggleSidebarTop');
+      const btnListTop = document.getElementById('btnToggleNoteListTop');
+
+      if (window.innerWidth <= 760 && !state.sidebarCollapsed) state.noteListCollapsed = true;
+      document.getElementById('navigationBackdrop').hidden = window.innerWidth > 760 || (state.sidebarCollapsed && state.noteListCollapsed);
+      btnTabTop.setAttribute('aria-expanded', String(!state.sidebarCollapsed));
+      btnListTop.setAttribute('aria-expanded', String(!state.noteListCollapsed));
+      sidebar.classList.toggle('collapsed', state.sidebarCollapsed);
+      resizerSidebar.classList.toggle('hidden', state.sidebarCollapsed);
+      noteList.classList.toggle('collapsed', state.noteListCollapsed);
+      resizerNoteList.classList.toggle('hidden', state.noteListCollapsed);
+
+      btnTabTop.classList.toggle('active-toggle', !state.sidebarCollapsed);
+      btnTabTop.textContent = state.sidebarCollapsed ? 'Hiện Tab' : 'Ẩn Tab';
+
+      btnListTop.classList.toggle('active-toggle', !state.noteListCollapsed);
+      btnListTop.textContent = state.noteListCollapsed ? 'Hiện DS' : 'Ẩn DS';
+
+      localStorage.setItem('notelab_sidebar_collapsed', state.sidebarCollapsed ? '1' : '0');
+      localStorage.setItem('notelab_notelist_collapsed', state.noteListCollapsed ? '1' : '0');
+    }
+
+    function toggleSidebarPanel() {
+      state.sidebarCollapsed = !state.sidebarCollapsed;
+      if (window.innerWidth <= 760 && !state.sidebarCollapsed) state.noteListCollapsed = true;
+      applyPanelVisibility();
+    }
+
+    function toggleNoteListPanel() {
+      state.noteListCollapsed = !state.noteListCollapsed;
+      if (window.innerWidth <= 760 && !state.noteListCollapsed) state.sidebarCollapsed = true;
+      applyPanelVisibility();
+    }
+
+    function applyNoteContentWidth() {
+      const slider = document.getElementById('noteWidthSlider');
+      const label = document.getElementById('noteWidthValueLabel');
+      const btnFull = document.getElementById('btnToggleFullWidth');
+
+      slider.value = state.noteContentWidth;
+      slider.disabled = state.noteFullWidth;
+      btnFull.classList.toggle('active-toggle', state.noteFullWidth);
+
+      if (state.noteFullWidth) {
+        document.documentElement.style.setProperty('--note-content-max-width', '100%');
+        label.textContent = '100%';
+      } else {
+        document.documentElement.style.setProperty('--note-content-max-width', `${state.noteContentWidth}px`);
+        label.textContent = `${state.noteContentWidth}px`;
+      }
+
+      localStorage.setItem('notelab_note_width', String(state.noteContentWidth));
+      localStorage.setItem('notelab_note_fullwidth', state.noteFullWidth ? '1' : '0');
+    }
+
+    function initDraggableResizers() {
+      // 1. Kéo chỉnh độ rộng Sidebar trái
+      const resizerSidebar = document.getElementById('resizerSidebar');
+      resizerSidebar.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        resizerSidebar.classList.add('dragging');
+        const onMove = (ev) => {
+          const newW = Math.min(450, Math.max(170, ev.clientX));
+          document.documentElement.style.setProperty('--sidebar-width', `${newW}px`);
+          localStorage.setItem('notelab_sidebar_w', `${newW}px`);
+        };
+        const onUp = () => {
+          resizerSidebar.classList.remove('dragging');
+          window.removeEventListener('mousemove', onMove);
+          window.removeEventListener('mouseup', onUp);
+        };
+        window.addEventListener('mousemove', onMove);
+        window.addEventListener('mouseup', onUp);
+      });
+
+      // 2. Kéo chỉnh độ rộng cột Danh sách ghi chú
+      const resizerNoteList = document.getElementById('resizerNoteList');
+      const noteListPane = document.getElementById('noteListPane');
+      resizerNoteList.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        resizerNoteList.classList.add('dragging');
+        const rectLeft = noteListPane.getBoundingClientRect().left;
+        const onMove = (ev) => {
+          const newW = Math.min(520, Math.max(200, ev.clientX - rectLeft));
+          document.documentElement.style.setProperty('--notelist-width', `${newW}px`);
+          localStorage.setItem('notelab_notelist_w', `${newW}px`);
+        };
+        const onUp = () => {
+          resizerNoteList.classList.remove('dragging');
+          window.removeEventListener('mousemove', onMove);
+          window.removeEventListener('mouseup', onUp);
+        };
+        window.addEventListener('mousemove', onMove);
+        window.addEventListener('mouseup', onUp);
+      });
+
+      // 3. Kéo chỉnh tỷ lệ chia đôi Soạn thảo / Xem trước
+      const resizerSplit = document.getElementById('resizerSplit');
+      const editorBody = document.getElementById('editorBody');
+      resizerSplit.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        resizerSplit.classList.add('dragging');
+        const onMove = (ev) => {
+          const rect = editorBody.getBoundingClientRect();
+          if (rect.width <= 0) return;
+          const pct = Math.min(80, Math.max(20, ((ev.clientX - rect.left) / rect.width) * 100));
+          const pctStr = `${pct.toFixed(1)}%`;
+          document.documentElement.style.setProperty('--split-left-percent', pctStr);
+          localStorage.setItem('notelab_split_pct', pctStr);
+        };
+        const onUp = () => {
+          resizerSplit.classList.remove('dragging');
+          window.removeEventListener('mousemove', onMove);
+          window.removeEventListener('mouseup', onUp);
+        };
+        window.addEventListener('mousemove', onMove);
+        window.addEventListener('mouseup', onUp);
+      });
+    }
+
+    /* =========================================================================
+       === SECTION: LƯU TRỮ INDEXEDDB (NOTES, IMAGES, VERSIONS, META) ===
+       ========================================================================= */
+    function openDatabase() {
+      return new Promise((resolve, reject) => {
+        try {
+          const request = indexedDB.open(DB_NAME, DB_VERSION);
+          request.onupgradeneeded = (event) => {
+            const db = event.target.result;
+            if (!db.objectStoreNames.contains('notes')) {
+              const noteStore = db.createObjectStore('notes', { keyPath: 'id' });
+              noteStore.createIndex('updatedAt', 'updatedAt', { unique: false });
+            }
+            if (!db.objectStoreNames.contains('images')) {
+              db.createObjectStore('images', { keyPath: 'id' });
+            }
+            if (!db.objectStoreNames.contains('versions')) {
+              const verStore = db.createObjectStore('versions', { keyPath: 'id' });
+              verStore.createIndex('noteId', 'noteId', { unique: false });
+            }
+            if (!db.objectStoreNames.contains('meta')) {
+              db.createObjectStore('meta', { keyPath: 'key' });
+            }
+          };
+          request.onsuccess = (event) => resolve(event.target.result);
+          request.onerror = (event) => reject(event.target.error);
+        } catch (err) {
+          reject(err);
+        }
+      });
+    }
+
+    function idbGetAll(storeName) {
+      return new Promise((resolve, reject) => {
+        try {
+          const tx = state.db.transaction(storeName, 'readonly');
+          const store = tx.objectStore(storeName);
+          const req = store.getAll();
+          req.onsuccess = () => resolve(req.result || []);
+          req.onerror = () => reject(req.error);
+        } catch (err) {
+          reject(err);
+        }
+      });
+    }
+
+    function idbGet(storeName, key) {
+      return new Promise((resolve, reject) => {
+        try {
+          const tx = state.db.transaction(storeName, 'readonly');
+          const store = tx.objectStore(storeName);
+          const req = store.get(key);
+          req.onsuccess = () => resolve(req.result);
+          req.onerror = () => reject(req.error);
+        } catch (err) {
+          reject(err);
+        }
+      });
+    }
+
+    function idbPut(storeName, value) {
+      return new Promise((resolve, reject) => {
+        try {
+          const tx = state.db.transaction(storeName, 'readwrite');
+          const store = tx.objectStore(storeName);
+          const req = store.put(value);
+          req.onsuccess = () => resolve(req.result);
+          req.onerror = () => reject(req.error);
+        } catch (err) {
+          reject(err);
+        }
+      });
+    }
+
+    function idbDelete(storeName, key) {
+      return new Promise((resolve, reject) => {
+        try {
+          const tx = state.db.transaction(storeName, 'readwrite');
+          const store = tx.objectStore(storeName);
+          const req = store.delete(key);
+          req.onsuccess = () => resolve();
+          req.onerror = () => reject(req.error);
+        } catch (err) {
+          reject(err);
+        }
+      });
+    }
+
+    function idbClear(storeName) {
+      return new Promise((resolve, reject) => {
+        try {
+          const tx = state.db.transaction(storeName, 'readwrite');
+          const store = tx.objectStore(storeName);
+          const req = store.clear();
+          req.onsuccess = () => resolve();
+          req.onerror = () => reject(req.error);
+        } catch (err) {
+          reject(err);
+        }
+      });
+    }
+
+    /* =========================================================================
+       === SECTION: DỮ LIỆU MẪU KHỞI TẠO LẦN ĐẦU ===
+       ========================================================================= */
+    async function seedInitialNotesIfEmpty() {
+      const existingNotes = await idbGetAll('notes');
+      if (existingNotes.length > 0) return;
+
+      const now = Date.now();
+      const note1 = {
+        id: 'note_seed_verilog',
+        title: 'Thiết kế Mạch Số & FSM bằng SystemVerilog',
+        tags: ['mạch-số', 'verilog', 'fpga'],
+        pinned: true,
+        createdAt: now - 3600000 * 12,
+        updatedAt: now - 1800000,
+        lastVersionAt: now - 3600000,
+        lastVersionContent: '',
+        content: `# Tổng quan về Máy Trạng Thái Hữu Hạn (FSM)
+
+Trong thiết kế vi mạch số (xem thêm bài [[Giải Tích Mạch Điện & Bộ Lọc RC]]), máy trạng thái hữu hạn **FSM (Finite State Machine)** được chia làm hai loại chính:
+
+- **Máy Moore:** Ngõ ra chỉ phụ thuộc vào *trạng thái hiện tại*.
+- **Máy Mealy:** Ngõ ra phụ thuộc vào cả *trạng thái hiện tại* và *tín hiệu ngõ vào*.
+
+## 1. Công thức tính tần số xung nhịp tối đa
+Chu kỳ xung nhịp nhỏ nhất $T_{clk}$ phải thỏa mãn bất đẳng thức thời gian giữ và thiết lập:
+
+$$T_{clk} \\ge t_{cq} + t_{logic\\_max} + t_{setup} - t_{skew}$$
+
+Từ đó suy ra tần số hoạt động cực đại của mạch tuần tự: $f_{max} = \\frac{1}{T_{clk\\_min}}$.
+
+## 2. Code mẫu SystemVerilog (Bộ đếm & FSM)
+
+\`\`\`systemverilog
+module fsm_counter #(
+  parameter int WIDTH = 4
+)(
+  input  logic             clk,
+  input  logic             rst_n,
+  input  logic             en,
+  output logic [WIDTH-1:0] count
+);
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n)
+      count <= '0;
+    else if (en)
+      count <= count + 1'b1;
+  end
+endmodule
+\`\`\`
+
+## 3. Giản đồ xung hoạt động của FSM (Waveform)
+\`\`\`wave
+${DEFAULT_WAVE_TEMPLATE}
+\`\`\`
+
+## 4. Thẻ Ôn Tập Flashcard (Tự động trích xuất)
+Q:: Sự khác biệt cơ bản giữa máy trạng thái Moore và máy trạng thái Mealy là gì?
+A:: Máy Moore có ngõ ra chỉ phụ thuộc vào trạng thái hiện tại, còn máy Mealy có ngõ ra phụ thuộc vào cả trạng thái hiện tại và tín hiệu ngõ vào.
+
+Q:: Công thức điều kiện thời gian thiết lập (Setup Time Constraint) trong mạch tuần tự là gì?
+A:: $T_{clk} \\ge t_{cq} + t_{logic\\_max} + t_{setup} - t_{skew}$`
+      };
+
+      const note2 = {
+        id: 'note_seed_rc',
+        title: 'Giải Tích Mạch Điện & Bộ Lọc RC',
+        tags: ['mạch-điện', 'vật-lý', 'tín-hiệu'],
+        pinned: true,
+        createdAt: now - 3600000 * 24,
+        updatedAt: now,
+        lastVersionAt: now - 3600000 * 2,
+        lastVersionContent: '',
+        content: `# Phân Tích Mạch Lọc Thông Thấp RC
+
+Bài viết này liên kết trực tiếp với [[Thiết kế Mạch Số & FSM bằng SystemVerilog]] để phục vụ môn Kỹ thuật Điện - Điện tử.
+
+## 1. Hàm truyền đạt và Tần số cắt
+Xét mạch RC nối tiếp có điện trở $R$ và tụ điện $C$ với trở kháng phức $Z_C = \\frac{1}{j\\omega C}$. Hàm truyền đạt của mạch lọc thông thấp:
+
+$$H(j\\omega) = \\frac{V_{out}(j\\omega)}{V_{in}(j\\omega)} = \\frac{1}{1 + j\\omega RC}$$
+
+Tần số cắt $-3\\text{ dB}$ được xác định bởi:
+
+$$f_c = \\frac{1}{2\\pi R C}$$
+
+## 2. Bảng so sánh đáp ứng tần số
+| Tần số ngõ vào $f$ | Biên độ $|H(j\\omega)|$ | Độ lệch pha $\\varphi$ |
+| :--- | :---: | :---: |
+| $f \\ll f_c$ | $\\approx 1$ ($0\\text{ dB}$) | $0^\\circ$ |
+| $f = f_c$ | $\\frac{1}{\\sqrt{2}} \\approx 0.707$ ($-3\\text{ dB}$) | $-45^\\circ$ |
+| $f \\gg f_c$ | Suy giảm $-20\\text{ dB/decade}$ | $-90^\\circ$ |
+
+## 3. Sơ đồ nguyên lý Mạch lọc thông thấp RC (Circuit)
+Mạch mẫu gồm nguồn xoay chiều VIN, điện trở R1 = 1 kΩ, tụ C1 = 100 nF và ngõ ra VOUT. Dây hồi nối cực âm nguồn với đầu dưới của tụ và điểm GND, tạo thành mạch kín. Bấm **Chỉnh sửa** trên sơ đồ để mở trình vẽ.
+
+\`\`\`circuit
+${DEFAULT_CIRCUIT_TEMPLATE}
+\`\`\`
+
+## 4. Tính toán nhanh bằng Python
+\`\`\`python
+import math
+
+def cutoff_frequency(r_ohm: float, c_farad: float) -> float:
+    return 1.0 / (2.0 * math.pi * r_ohm * c_farad)
+
+print(f"Tần số cắt fc = {cutoff_frequency(1000, 100e-9):.2f} Hz")
+\`\`\`
+
+## 5. Checklist Ôn Thi Giữa Kỳ
+- [x] Nắm vững định luật Kirchhoff dòng và áp (KCL, KVL)
+- [x] Thuộc công thức tần số cắt $f_c = \\frac{1}{2\\pi RC}$
+- [ ] Giải 5 bài tập biến đổi Laplace mạch RLC
+
+Q:: Tần số cắt $f_c$ của mạch lọc thông thấp RC bậc 1 được tính theo công thức nào?
+A:: $f_c = \\frac{1}{2\\pi R C}$ (tại đó biên độ suy giảm $-3\\text{ dB}$ và pha trễ $-45^\\circ$).`
+      };
+
+      note1.lastVersionContent = note1.content;
+      note2.lastVersionContent = note2.content;
+
+      await idbPut('notes', note1);
+      await idbPut('notes', note2);
+
+      await idbPut('versions', {
+        id: generateId('ver'),
+        noteId: note1.id,
+        title: note1.title,
+        content: note1.content,
+        savedAt: now - 3600000
+      });
+
+      const existingMeta = await idbGet('meta', 'lastBackupAt');
+      if (!existingMeta) {
+        // Đặt mốc sao lưu cuối là "bây giờ" để người dùng mới không bị nhắc sao lưu ngay
+        await idbPut('meta', {
+          key: 'lastBackupAt',
+          value: now
+        });
+      }
+    }
+
+    /* =========================================================================
+       === SECTION: NÂNG CẤP KHỐI MẪU CŨ, GIỮ NGUYÊN GHI CHÚ NGƯỜI DÙNG ===
+       ========================================================================= */
+    function upgradeLegacySampleContent(note) {
+      const sampleTypes = {
+        note_seed_rc: 'circuit',
+        note_seed_verilog: 'wave'
+      };
+      const blockType = Object.prototype.hasOwnProperty.call(sampleTypes, note.id)
+        ? sampleTypes[note.id] : null;
+      if (!blockType) return note.content;
+      const legacyBlocks = {"circuit": "VIN --- [ R = 1kOhm ] ---+--- VOUT\n                         |\n                    [ C = 100nF ]\n                         |\n                        GND", "wave": "clk:   010101010101\nrst_n: 001111111111\nen:    000111100111\ncount: 000012344456"};
+      const normalize = (code) => String(code).replace(/\r\n/g, '\n').trim()
+        .split('\n').map((line) => line.trim()).join('\n');
+      const pattern = new RegExp('```' + blockType + '[ \t]*\\r?\\n([\\s\\S]*?)```', 'gi');
+      let changed = false;
+      let content = String(note.content || '').replace(pattern, (match, code) => {
+        if (normalize(code) !== normalize(legacyBlocks[blockType])) return match;
+        changed = true;
+        const replacement = blockType === 'circuit' ? DEFAULT_CIRCUIT_TEMPLATE : DEFAULT_WAVE_TEMPLATE;
+        return '```' + blockType + '\n' + replacement + '\n```';
+      });
+      if (!changed) return note.content;
+      if (blockType === 'circuit') {
+        content = content.replace('## 3. Sơ đồ nguyên lý (Circuit - Chờ Đợt 2)',
+          '## 3. Sơ đồ nguyên lý Mạch lọc thông thấp RC (Circuit)');
+      } else {
+        content = content.replace('## 3. Khung Giản đồ xung (Waveform - Chờ Đợt 2)',
+          '## 3. Giản đồ xung hoạt động của FSM (Waveform)');
+      }
+      return content;
+    }
+
+    async function migrateLegacySampleNotes() {
+      const notes = await idbGetAll('notes');
+      for (const note of notes) {
+        const content = upgradeLegacySampleContent(note);
+        if (content === note.content) continue;
+        const now = Date.now();
+        // Lưu bản gốc và bản đã nâng cấp trong cùng giao dịch, không xóa lịch sử cũ.
+        await new Promise((resolve, reject) => {
+          const tx = state.db.transaction(['notes', 'versions'], 'readwrite');
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error || new Error('Không thể nâng cấp ghi chú mẫu.'));
+          tx.onabort = () => reject(tx.error || new Error('Đã hủy nâng cấp ghi chú mẫu.'));
+          tx.objectStore('versions').put({
+            id: generateId('ver'), noteId: note.id, title: note.title,
+            content: note.content, savedAt: now
+          });
+          tx.objectStore('notes').put({
+            ...note, content, updatedAt: now,
+            lastVersionAt: now, lastVersionContent: content
+          });
+        });
+      }
+    }
+
+    /* =========================================================================
+       === SECTION: XỬ LÝ MARKDOWN + KATEX + HIGHLIGHT.JS + WIKILINKS + ẢNH ===
+       ========================================================================= */
+    function highlightSearchTermInHtml(htmlString, query) {
+      if (!query || !query.trim()) return htmlString;
+      const cleanQuery = query.trim();
+      const regex = new RegExp(`(${escapeRegExp(cleanQuery)})`, 'gi');
+
+      const container = document.createElement('div');
+      container.innerHTML = htmlString;
+
+      function walkNodes(node) {
+        if (node.nodeType === Node.TEXT_NODE) {
+          if (regex.test(node.nodeValue)) {
+            const span = document.createElement('span');
+            span.innerHTML = escapeHtml(node.nodeValue).replace(regex, '<mark>$1</mark>');
+            node.parentNode.replaceChild(span, node);
+          }
+        } else if (
+          node.nodeType === Node.ELEMENT_NODE &&
+          !['CODE', 'PRE', 'SCRIPT', 'STYLE', 'MARK'].includes(node.tagName) &&
+          !node.classList.contains('katex') &&
+          !node.classList.contains('phase2-placeholder')
+        ) {
+          Array.from(node.childNodes).forEach(walkNodes);
+        }
+      }
+
+      walkNodes(container);
+      return container.innerHTML;
+    }
+
+    function sanitizeHtmlFragment(dirtyHtml) {
+      if (!window.DOMPurify) return escapeHtml(dirtyHtml);
+      return DOMPurify.sanitize(dirtyHtml, {
+        ALLOWED_URI_REGEXP: /^(?:(?:(?:f|ht)tps?|mailto|tel|callto|sms|cid|xmpp|data|blob|idb):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
+        ADD_ATTR: ['target', 'data-wikilink', 'data-open-note-id']
+      });
+    }
+
+    function renderMarkdownWithExtensions(rawMarkdown, options = { highlightSearch: true }) {
+      if (!rawMarkdown) return '';
+
+      const tokens = [];
+      const addToken = (renderedHtml) => {
+        const key = `@@NOTELAB_TOKEN_${tokens.length}@@`;
+        tokens.push({ key, html: renderedHtml });
+        return key;
+      };
+
+      const specialBlockCounters = {};
+      let text = String(rawMarkdown);
+
+      // 1. Tách các Fenced Code Blocks (```lang ... ```) và đếm đúng thứ tự xuất hiện từng loại khối
+      text = text.replace(/```([a-zA-Z0-9_-]*)\r?\n([\s\S]*?)```/g, (match, lang, codeContent) => {
+        const cleanLang = (lang || '').trim().toLowerCase();
+
+        if (cleanLang && typeof blockRenderers[cleanLang] === 'function') {
+          const idx = specialBlockCounters[cleanLang] || 0;
+          specialBlockCounters[cleanLang] = idx + 1;
+          const blockId = `${cleanLang}_${idx}`;
+          try {
+            return addToken(blockRenderers[cleanLang](codeContent, blockId));
+          } catch (err) {
+            return addToken(`
+              <div class="special-block-card">
+                <div class="special-block-error">
+                  <div class="special-block-error-title">Lỗi hiển thị khối ${escapeHtml(cleanLang)}</div>
+                  <div>${escapeHtml(err.message || String(err))}</div>
+                </div>
+              </div>
+            `);
+          }
+        }
+
+        let highlighted = escapeHtml(codeContent);
+        if (window.hljs) {
+          try {
+            if (cleanLang && hljs.getLanguage(cleanLang)) {
+              highlighted = hljs.highlight(codeContent, { language: cleanLang, ignoreIllegals: true }).value;
+            } else {
+              highlighted = hljs.highlightAuto(codeContent).value;
+            }
+          } catch (e) {
+            highlighted = escapeHtml(codeContent);
+          }
+        }
+        const langBadge = cleanLang ? `<div style="font-size:11px; color:#8b949e; margin-bottom:6px; font-family:var(--font-code); text-transform:uppercase;">${escapeHtml(cleanLang)}</div>` : '';
+        return addToken(`<pre>${langBadge}<code class="hljs ${escapeHtml(cleanLang)}">${highlighted}</code></pre>`);
+      });
+
+      // 2. Tách Inline Code (`...`)
+      text = text.replace(/`([^`\r\n]+)`/g, (match, inlineCode) => {
+        return addToken(`<code>${escapeHtml(inlineCode)}</code>`);
+      });
+
+      // 3. Tách LaTeX Block ($$...$$)
+      text = text.replace(/\$\$([\s\S]+?)\$\$/g, (match, formula) => {
+        if (window.katex) {
+          try {
+            const html = katex.renderToString(formula.trim(), {
+              displayMode: true,
+              throwOnError: false
+            });
+            return addToken(`<div style="overflow-x:auto; margin: 12px 0;">${html}</div>`);
+          } catch (err) {
+            return addToken(`<pre><code>${escapeHtml(match)}</code></pre>`);
+          }
+        }
+        return addToken(`<div>${escapeHtml(match)}</div>`);
+      });
+
+      // 4. Tách LaTeX Inline ($...$)
+      text = text.replace(/\$([^\$\r\n]+?)\$/g, (match, formula) => {
+        if (window.katex) {
+          try {
+            const html = katex.renderToString(formula.trim(), {
+              displayMode: false,
+              throwOnError: false
+            });
+            return addToken(html);
+          } catch (err) {
+            return addToken(`<code>${escapeHtml(match)}</code>`);
+          }
+        }
+        return addToken(`<span>${escapeHtml(match)}</span>`);
+      });
+
+      // 5. Biến đổi cặp dòng Flashcard Q:: / A:: thành hộp Flashcard (lọc an toàn)
+      text = text.replace(/^Q::\s*(.+?)\r?\nA::\s*(.+)$/gm, (match, qText, aText) => {
+        return addToken(`
+          <div class="inline-flashcard-box">
+            <div class="inline-fc-q">Câu hỏi (Q): ${escapeHtml(qText)}</div>
+            <div class="inline-fc-a">Đáp án (A): ${escapeHtml(aText)}</div>
+          </div>
+        `);
+      });
+
+      // 6. Biến đổi liên kết nội bộ [[Tên ghi chú]]
+      text = text.replace(/\[\[([^\]\|]+)(?:\|([^\]]+))?\]\]/g, (match, targetTitle, customLabel) => {
+        const cleanTarget = targetTitle.trim();
+        const label = (customLabel || cleanTarget).trim();
+        const exists = state.notes.some((n) => n.title.trim().toLowerCase() === cleanTarget.toLowerCase());
+        const missingClass = exists ? '' : 'missing';
+        return addToken(
+          `<a href="#" class="wikilink ${missingClass}" data-wikilink="${escapeHtml(cleanTarget)}" title="${exists ? 'Mở ghi chú: ' : 'Tạo và mở ghi chú: '}${escapeHtml(cleanTarget)}">[${escapeHtml(label)}]</a>`
+        );
+      });
+
+      // 7. Parse Markdown bằng Marked và lọc qua DOMPurify
+      let parsedHtml = window.marked ? marked.parse(text) : escapeHtml(text);
+      parsedHtml = sanitizeHtmlFragment(parsedHtml);
+
+      // 8. Khôi phục toàn bộ Token đã tách
+      for (let pass = 0; pass < 2; pass++) {
+        for (let i = 0; i < tokens.length; i++) {
+          parsedHtml = parsedHtml.split(tokens[i].key).join(tokens[i].html);
+        }
+      }
+
+      // 9. Tô sáng từ khóa nếu đang tìm kiếm
+      if (options.highlightSearch && state.searchQuery.trim()) {
+        parsedHtml = highlightSearchTermInHtml(parsedHtml, state.searchQuery);
+      }
+
+      return parsedHtml;
+    }
+
+    /* =========================================================================
+       === SECTION: XỬ LÝ DÁN ẢNH (CTRL+V) & KÉO-THẢ ẢNH VÀO INDEXEDDB ===
+       ========================================================================= */
+    function compressAndConvertImageToBlob(file, maxDimension = 1200, quality = 0.85) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          const img = new Image();
+          img.onload = () => {
+            let { width, height } = img;
+            if (width > maxDimension || height > maxDimension) {
+              if (width > height) {
+                height = Math.round((height * maxDimension) / width);
+                width = maxDimension;
+              } else {
+                width = Math.round((width * maxDimension) / height);
+                height = maxDimension;
+              }
+            }
+            const canvas = document.createElement('canvas');
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(img, 0, 0, width, height);
+
+            const outputMime = file.type === 'image/png' ? 'image/png' : 'image/jpeg';
+            canvas.toBlob(
+              (blob) => {
+                if (blob) resolve(blob);
+                else reject(new Error('Không thể tạo Blob từ ảnh'));
+              },
+              outputMime,
+              quality
+            );
+          };
+          img.onerror = () => reject(new Error('File ảnh không hợp lệ'));
+          img.src = e.target.result;
+        };
+        reader.onerror = () => reject(new Error('Lỗi đọc file ảnh'));
+        reader.readAsDataURL(file);
+      });
+    }
+
+    async function handleInsertImageFiles(fileList) {
+      const files = Array.from(fileList || []).filter((f) => f.type && f.type.startsWith('image/'));
+      if (files.length === 0) return;
+
+      const textarea = document.getElementById('markdownInput');
+      for (const file of files) {
+        try {
+          setSaveStatus('saving');
+          const blob = await compressAndConvertImageToBlob(file);
+          const imageId = generateId('img');
+          await idbPut('images', {
+            id: imageId,
+            blob: blob,
+            mimeType: blob.type,
+            createdAt: Date.now()
+          });
+
+          const markdownImageSyntax = `\n![Hình ảnh](idb://${imageId})\n`;
+          insertTextAtCursor(textarea, markdownImageSyntax);
+          showToast('Đã chèn và lưu ảnh vào IndexedDB', 'success');
+        } catch (err) {
+          console.error('Lỗi lưu ảnh:', err);
+          showToast('Không thể chèn ảnh: ' + err.message, 'error');
+        }
+      }
+      handleEditorInput();
+    }
+
+    function insertTextAtCursor(textarea, textToInsert) {
+      const start = textarea.selectionStart || 0;
+      const end = textarea.selectionEnd || 0;
+      const value = textarea.value;
+      textarea.value = value.substring(0, start) + textToInsert + value.substring(end);
+      const newPos = start + textToInsert.length;
+      textarea.selectionStart = newPos;
+      textarea.selectionEnd = newPos;
+      textarea.focus();
+    }
+
+    async function resolveIdbImagesInContainer(container) {
+      while (state.activeObjectUrls.length > 0) {
+        URL.revokeObjectURL(state.activeObjectUrls.pop());
+      }
+
+      const imgs = container.querySelectorAll('img');
+      for (const imgEl of imgs) {
+        const src = imgEl.getAttribute('src') || '';
+        if (src.startsWith('idb://')) {
+          const imageId = src.replace('idb://', '').trim();
+          try {
+            const record = await idbGet('images', imageId);
+            if (!imgEl.isConnected || !container.contains(imgEl) || imgEl.getAttribute('src') !== src) continue;
+            if (record && record.blob) {
+              const objUrl = URL.createObjectURL(record.blob);
+              state.activeObjectUrls.push(objUrl);
+              imgEl.src = objUrl;
+            } else {
+              imgEl.alt = 'Không tìm thấy ảnh trong IndexedDB (' + imageId + ')';
+            }
+          } catch (err) {
+            console.warn('Lỗi tải ảnh từ IndexedDB:', err);
+          }
+        }
+      }
+    }
+
+    /* =========================================================================
+       === SECTION: QUẢN LÝ GHI CHÚ, TAG, TÌM KIẾM & BACKLINKS ===
+       ========================================================================= */
+    // Thư mục phẳng; dữ liệu nằm trong meta để không đổi phiên bản IndexedDB.
+    function normalizeFolders(raw) {
+      if (raw == null) return [];
+      if (!Array.isArray(raw)) throw new Error('Danh sách thư mục không hợp lệ.');
+      const ids = new Set();
+      return raw.map(f => {
+        if (!f || typeof f.id !== 'string' || !f.id || f.id.length > 200 || typeof f.name !== 'string' || !f.name.trim() || f.name.trim().length > 80 || ids.has(f.id)) {
+          throw new Error('Dữ liệu thư mục có tên hoặc mã không hợp lệ.');
+        }
+        ids.add(f.id);
+        return { id: f.id, name: f.name.trim(), createdAt: Number(f.createdAt) || Date.now() };
+      });
+    }
+
+    function getNoteFolderId(note) {
+      return state.folders.some(f => f.id === note.folderId) ? note.folderId : null;
+    }
+
+    function folderName(id) {
+      return state.folders.find(f => f.id === id)?.name || 'Chưa phân loại';
+    }
+
+    function commitFolderChanges(folders, changedNotes = []) {
+      return new Promise((resolve, reject) => {
+        const tx = state.db.transaction(['notes', 'meta'], 'readwrite');
+        tx.objectStore('meta').put({ key: 'folders', value: folders });
+        for (const note of changedNotes) tx.objectStore('notes').put(note);
+        tx.oncomplete = () => {
+          state.folders = folders;
+          for (const changed of changedNotes) {
+            const original = state.notes.find(n => n.id === changed.id);
+            if (original) Object.assign(original, changed);
+          }
+          resolve();
+        };
+        tx.onabort = () => reject(tx.error || new Error('Không thể lưu thư mục.'));
+        tx.onerror = () => reject(tx.error || new Error('Không thể lưu thư mục.'));
+      });
+    }
+
+    function renderFolders() {
+      const count = id => state.notes.filter(n => getNoteFolderId(n) === id).length;
+      document.getElementById('countUnfiledNotes').textContent = count(null);
+      document.getElementById('navUnfiledNotes').classList.toggle('active', state.filterType === 'folder' && state.filterFolderId === null);
+      document.getElementById('sidebarFolderList').innerHTML = [...state.folders]
+        .sort((a,b) => a.name.localeCompare(b.name, 'vi'))
+        .map(f => `<div class="folder-row"><button class="nav-item ${state.filterType === 'folder' && state.filterFolderId === f.id ? 'active' : ''}" data-folder-id="${escapeHtml(f.id)}" title="${escapeHtml(f.name)} · Có thể thả ghi chú vào đây"><span class="nav-item-left"><span class="folder-symbol" aria-hidden="true"></span><span class="folder-name">${escapeHtml(f.name)}</span></span><span class="nav-count">${count(f.id)}</span></button><button class="folder-edit" data-edit-folder="${escapeHtml(f.id)}" title="Quản lý thư mục ${escapeHtml(f.name)}" aria-label="Quản lý thư mục ${escapeHtml(f.name)}">···</button></div>`).join('');
+      const note = getActiveNote();
+      if (note) renderNoteFolderSelect(note);
+    }
+
+    function renderNoteFolderSelect(note) {
+      const select = document.getElementById('noteFolderSelect');
+      select.innerHTML = '<option value="">Chưa phân loại</option>' + [...state.folders].sort((a,b) => a.name.localeCompare(b.name, 'vi')).map(f => `<option value="${escapeHtml(f.id)}">${escapeHtml(f.name)}</option>`).join('');
+      select.value = getNoteFolderId(note) || '';
+      document.getElementById('activeFolderBreadcrumb').textContent = folderName(getNoteFolderId(note));
+    }
+
+    function openFolderDialog(id = null) {
+      const folder = state.folders.find(f => f.id === id);
+      state.editingFolderId = folder?.id || null;
+      document.getElementById('folderModalTitle').textContent = folder ? 'Quản lý thư mục' : 'Tạo thư mục';
+      document.getElementById('btnSaveFolder').textContent = folder ? 'Lưu thay đổi' : 'Tạo thư mục';
+      document.getElementById('folderNameInput').value = folder?.name || '';
+      document.getElementById('folderError').textContent = '';
+      document.getElementById('btnDeleteFolder').hidden = !folder;
+      document.getElementById('folderDeleteWarning').hidden = true;
+      document.getElementById('modalFolder').classList.add('open');
+      document.getElementById('folderNameInput').focus();
+    }
+
+    async function saveFolderFromDialog() {
+      if (state.folderBusy) return;
+      const name = document.getElementById('folderNameInput').value.trim();
+      const id = state.editingFolderId;
+      if (!name || name.length > 80) { document.getElementById('folderError').textContent = 'Nhập tên từ 1 đến 80 ký tự.'; return; }
+      if (state.folders.some(f => f.id !== id && f.name.toLocaleLowerCase('vi') === name.toLocaleLowerCase('vi'))) {
+        document.getElementById('folderError').textContent = 'Tên thư mục đã tồn tại.'; return;
+      }
+      state.folderBusy = true;
+      try {
+        const folderId = id || generateId('folder');
+        const folders = id ? state.folders.map(f => f.id === id ? {...f, name} : f) : [...state.folders, {id:folderId, name, createdAt:Date.now()}];
+        await commitFolderChanges(folders);
+        if (!id) { state.filterType = 'folder'; state.filterFolderId = folderId; state.filterTag = null; }
+        document.getElementById('modalFolder').classList.remove('open');
+        renderSidebar(); renderNoteList();
+        if (window.innerWidth <= 760 && !id) { state.sidebarCollapsed=true; state.noteListCollapsed=false; applyPanelVisibility(); }
+        document.getElementById('btnNewFolder').focus();
+        showToast(id ? 'Đã đổi tên thư mục.' : 'Đã tạo thư mục. Bạn có thể tạo ghi chú hoặc kéo ghi chú vào đây.', 'success');
+      } catch (err) { document.getElementById('folderError').textContent = err.message; }
+      finally { state.folderBusy = false; }
+    }
+
+    async function moveNoteToFolder(noteId, folderId) {
+      const note = state.notes.find(n => n.id === noteId);
+      if (!note || (folderId && !state.folders.some(f => f.id === folderId))) return;
+      const before = getNoteFolderId(note);
+      try {
+        // Giữ nguyên đối tượng trong bộ nhớ để bộ hẹn giờ tự lưu dùng folderId mới.
+        note.folderId = folderId;
+        await commitFolderChanges(state.folders, [note]);
+        renderSidebar(); renderNoteList();
+        showToast('Đã chuyển vào ' + folderName(folderId), 'success');
+      } catch (err) { note.folderId = before; renderFolders(); showToast(err.message, 'error'); }
+    }
+
+    async function deleteFolderAndKeepNotes(id) {
+      if (!state.folders.some(f => f.id === id)) return;
+      const changed = state.notes.filter(n => n.folderId === id);
+      changed.forEach(n => { n.folderId = null; });
+      try { await commitFolderChanges(state.folders.filter(f => f.id !== id), changed); }
+      catch (err) { changed.forEach(n => { n.folderId = id; }); throw err; }
+      if (state.filterType === 'folder' && state.filterFolderId === id) state.filterFolderId = null;
+      renderSidebar(); renderNoteList();
+    }
+
+    function bindFolderEvents() {
+      document.getElementById('btnNewFolder').addEventListener('click', () => openFolderDialog());
+      document.getElementById('btnManageCurrentFolder').addEventListener('click', () => openFolderDialog(state.filterFolderId));
+      document.getElementById('folderForm').addEventListener('submit', e => { e.preventDefault(); saveFolderFromDialog(); });
+      document.getElementById('btnDeleteFolder').addEventListener('click', () => { document.getElementById('folderDeleteWarning').hidden = false; });
+      document.getElementById('btnConfirmDeleteFolder').addEventListener('click', async () => {
+        if (state.folderBusy) return;
+        state.folderBusy = true;
+        try {
+          await deleteFolderAndKeepNotes(state.editingFolderId);
+          document.getElementById('modalFolder').classList.remove('open');
+          document.getElementById('btnNewFolder').focus();
+          showToast('Đã xóa thư mục. Các ghi chú được giữ ở Chưa phân loại.', 'success');
+        } catch (err) { document.getElementById('folderError').textContent = err.message; }
+        finally { state.folderBusy = false; }
+      });
+      document.getElementById('noteFolderSelect').addEventListener('change', e => { const note=getActiveNote(); if(note) moveNoteToFolder(note.id, e.target.value || null); });
+      const nav = document.querySelector('.sidebar-nav');
+      nav.addEventListener('click', e => {
+        const edit=e.target.closest('[data-edit-folder]');
+        if(edit) { openFolderDialog(edit.dataset.editFolder); return; }
+        const button=e.target.closest('[data-folder-id]');
+        if(!button) return;
+        state.filterType='folder'; state.filterFolderId=button.dataset.folderId || null; state.filterTag=null;
+        if (window.innerWidth <= 760) { state.sidebarCollapsed=true; state.noteListCollapsed=false; applyPanelVisibility(); }
+        renderSidebar(); renderNoteList();
+      });
+      const list=document.getElementById('noteListContainer');
+      list.addEventListener('keydown', e => { if((e.key==='Enter' || e.key===' ') && e.target.matches('.note-card')) { e.preventDefault(); e.target.click(); } });
+      list.addEventListener('dragstart', e => {
+        const card=e.target.closest('[data-note-id]'); if(!card) return;
+        e.dataTransfer.setData('application/x-notelab-note',card.dataset.noteId); e.dataTransfer.effectAllowed='move';
+      });
+      nav.addEventListener('dragover', e => {
+        const target=e.target.closest('[data-folder-id]');
+        if(target && Array.from(e.dataTransfer.types).includes('application/x-notelab-note')) { e.preventDefault(); e.dataTransfer.dropEffect='move'; target.classList.add('folder-drop-target'); }
+      });
+      nav.addEventListener('dragleave', e => { const target=e.target.closest('[data-folder-id]'); if(target && !target.contains(e.relatedTarget)) target.classList.remove('folder-drop-target'); });
+      nav.addEventListener('drop', e => {
+        const target=e.target.closest('[data-folder-id]'); if(!target) return;
+        e.preventDefault(); target.classList.remove('folder-drop-target');
+        const noteId=e.dataTransfer.getData('application/x-notelab-note'); if(noteId) moveNoteToFolder(noteId,target.dataset.folderId || null);
+      });
+      const menu=document.getElementById('workspaceOptions');
+      document.addEventListener('click', e => { if(!menu.contains(e.target)) menu.open=false; });
+      menu.addEventListener('click', e => { if(e.target.closest('button') && !e.target.closest('.width-control-group')) menu.open=false; });
+      const modal=document.getElementById('modalFolder');
+      modal.addEventListener('keydown', e => {
+        if(e.key==='Escape') { e.stopPropagation(); modal.classList.remove('open'); document.getElementById('btnNewFolder').focus(); }
+        if(e.key==='Tab') {
+          const fields=Array.from(modal.querySelectorAll('button, input')).filter(el => !el.hidden && el.getClientRects().length);
+          if(e.shiftKey && document.activeElement===fields[0]) { e.preventDefault(); fields[fields.length-1].focus(); }
+          else if(!e.shiftKey && document.activeElement===fields[fields.length-1]) { e.preventDefault(); fields[0].focus(); }
+        }
+      });
+    }
+
+    function getActiveNote() {
+      return state.notes.find((n) => n.id === state.activeNoteId) || null;
+    }
+
+    function getAllTagsWithCounts() {
+      const counts = new Map();
+      for (const note of state.notes) {
+        if (Array.isArray(note.tags)) {
+          for (const t of note.tags) {
+            const clean = t.trim().toLowerCase();
+            if (clean) counts.set(clean, (counts.get(clean) || 0) + 1);
+          }
+        }
+      }
+      return Array.from(counts.entries()).sort((a, b) => a[0].localeCompare(b[0], 'vi'));
+    }
+
+    function getFilteredNotes() {
+      const q = state.searchQuery.trim().toLowerCase();
+      return state.notes
+        .filter((note) => {
+          if (state.filterType === 'folder' && getNoteFolderId(note) !== state.filterFolderId) return false;
+          if (state.filterType === 'pinned' && !note.pinned) return false;
+          if (state.filterType === 'tag' && state.filterTag) {
+            const hasTag = (note.tags || []).some((t) => t.toLowerCase() === state.filterTag.toLowerCase());
+            if (!hasTag) return false;
+          }
+          if (q) {
+            const inTitle = (note.title || '').toLowerCase().includes(q);
+            const inContent = (note.content || '').toLowerCase().includes(q);
+            const inTags = (note.tags || []).some((t) => t.toLowerCase().includes(q));
+            return inTitle || inContent || inTags;
+          }
+          return true;
+        })
+        .sort((a, b) => {
+          if (Boolean(a.pinned) !== Boolean(b.pinned)) {
+            return a.pinned ? -1 : 1;
+          }
+          return (b.updatedAt || 0) - (a.updatedAt || 0);
+        });
+    }
+
+    function computeBacklinksForNote(targetNote) {
+      if (!targetNote || !targetNote.title.trim()) return [];
+      const targetTitleLower = targetNote.title.trim().toLowerCase();
+      const wikiRegex = /\[\[([^\]\|]+)(?:\|[^\]]+)?\]\]/g;
+      const results = [];
+
+      for (const other of state.notes) {
+        if (other.id === targetNote.id) continue;
+        const content = other.content || '';
+        let match;
+        let found = false;
+        wikiRegex.lastIndex = 0;
+        while ((match = wikiRegex.exec(content)) !== null) {
+          if (match[1].trim().toLowerCase() === targetTitleLower) {
+            found = true;
+            break;
+          }
+        }
+        if (found) {
+          results.push(other);
+        }
+      }
+      return results;
+    }
+
+    /* =========================================================================
+       === SECTION: RENDER GIAO DIỆN 3 CỘT ===
+       ========================================================================= */
+    // Trạng thái giao diện tạm thời: không ghi vào dữ liệu học tập hoặc bản sao lưu.
+    const workspaceUi = {
+      noteId: null, request: 0, previewRequest: 0,
+      positions: new Map(), animations: new Map(),
+      motionPreference: window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : null
+    };
+
+    function playSurfaceMotion(element, slide = true, duration = 220) {
+      const previous = workspaceUi.animations.get(element);
+      if (previous) previous.cancel();
+      workspaceUi.animations.delete(element);
+      if (!element || workspaceUi.motionPreference?.matches || typeof element.animate !== 'function') return;
+      const frames = slide
+        ? [{opacity:0.35, transform:'translateY(6px)'}, {opacity:1, transform:'translateY(0)'}]
+        : [{opacity:0.5}, {opacity:1}];
+      const animation = element.animate(frames, {duration, easing:'cubic-bezier(.22,1,.36,1)'});
+      workspaceUi.animations.set(element, animation);
+      const clean = () => { if (workspaceUi.animations.get(element) === animation) workspaceUi.animations.delete(element); };
+      animation.onfinish = clean;
+      animation.oncancel = clean;
+    }
+
+    function syncNoteCards(container, markup) {
+      const template = document.createElement('template');
+      template.innerHTML = markup;
+      const existing = new Map(Array.from(container.children).filter(el => el.dataset.noteId).map(el => [el.dataset.noteId, el]));
+      const retained = new Set();
+      let cursor = container.firstElementChild;
+      for (const incoming of Array.from(template.content.children)) {
+        const card = existing.get(incoming.dataset.noteId) || incoming;
+        if (card !== incoming) {
+          for (const attr of Array.from(incoming.attributes)) {
+            if (card.getAttribute(attr.name) !== attr.value) card.setAttribute(attr.name, attr.value);
+          }
+          if (card.innerHTML !== incoming.innerHTML) card.replaceChildren(...incoming.childNodes);
+        }
+        if (card !== cursor) container.insertBefore(card, cursor);
+        retained.add(card);
+        cursor = card.nextElementSibling;
+      }
+      for (const child of Array.from(container.children)) if (!retained.has(child)) child.remove();
+    }
+
+    function cancelWorkspaceMotions() {
+      for (const animation of Array.from(workspaceUi.animations.values())) animation.cancel();
+      workspaceUi.animations.clear();
+    }
+
+    function rememberWorkspacePosition() {
+      if (!workspaceUi.noteId) return;
+      const input = document.getElementById('markdownInput');
+      workspaceUi.positions.delete(workspaceUi.noteId);
+      workspaceUi.positions.set(workspaceUi.noteId, {
+        editor:input.scrollTop,
+        preview:document.getElementById('previewPane').scrollTop,
+        start:input.selectionStart, end:input.selectionEnd
+      });
+      if (workspaceUi.positions.size > 100) workspaceUi.positions.delete(workspaceUi.positions.keys().next().value);
+    }
+
+    function bindRefinedUiEvents() {
+      document.getElementById('btnSidebarNewNote').addEventListener('click', () => createNewNote());
+      const closeNavigation = () => {
+        state.sidebarCollapsed = true; state.noteListCollapsed = true;
+        applyPanelVisibility();
+        document.getElementById('btnToggleSidebarTop').focus();
+      };
+      document.getElementById('navigationBackdrop').addEventListener('click', closeNavigation);
+      document.addEventListener('keydown', e => {
+        if (e.key === 'Escape' && !document.querySelector('.modal-backdrop.open')) {
+          document.getElementById('workspaceOptions').open = false;
+          if (!document.getElementById('navigationBackdrop').hidden) closeNavigation();
+        }
+      });
+      const stopMotion = () => {
+        if (workspaceUi.motionPreference?.matches) {
+          cancelWorkspaceMotions();
+        }
+      };
+      if (workspaceUi.motionPreference?.addEventListener) workspaceUi.motionPreference.addEventListener('change', stopMotion);
+      window.addEventListener('beforeprint', cancelWorkspaceMotions);
+      const compact = window.matchMedia ? window.matchMedia('(max-width: 760px)') : null;
+      if (compact?.addEventListener) compact.addEventListener('change', e => {
+        if (e.matches) { state.sidebarCollapsed = true; state.noteListCollapsed = true; }
+        applyPanelVisibility();
+      });
+      // Tương tác với trình soạn/vùng vẽ luôn dừng chuyển động đang chạy.
+      document.getElementById('editorBody').addEventListener('pointerdown', () => {
+        workspaceUi.animations.get(document.getElementById('editorBody'))?.cancel();
+      });
+    }
+
+    function renderSidebar() {
+      renderFolders();
+      document.getElementById('countAllNotes').textContent = state.notes.length;
+      document.getElementById('countPinnedNotes').textContent = state.notes.filter((n) => n.pinned).length;
+
+      document.getElementById('navAllNotes').classList.toggle('active', state.filterType === 'all');
+      document.getElementById('navPinnedNotes').classList.toggle('active', state.filterType === 'pinned');
+
+      const tagListEl = document.getElementById('sidebarTagList');
+      const tags = getAllTagsWithCounts();
+      if (tags.length === 0) {
+        tagListEl.innerHTML = `<div style="padding:6px 10px; font-size:13px; color:var(--text-muted);">Chưa có tag nào</div>`;
+      } else {
+        tagListEl.innerHTML = tags
+          .map(([tag, count]) => {
+            const isActive = state.filterType === 'tag' && state.filterTag === tag;
+            return `
+              <button class="nav-item ${isActive ? 'active' : ''}" data-tag="${escapeHtml(tag)}">
+                <span class="nav-item-left"># ${escapeHtml(tag)}</span>
+                <span class="nav-count">${count}</span>
+              </button>
+            `;
+          })
+          .join('');
+      }
+
+      const allCards = extractAllFlashcards();
+      document.getElementById('flashcardTotalBadge').textContent = `${allCards.length} thẻ`;
+    }
+
+    function highlightPlainText(text, query) {
+      const safe = escapeHtml(text || '');
+      if (!query || !query.trim()) return safe;
+      const regex = new RegExp(`(${escapeRegExp(query.trim())})`, 'gi');
+      return safe.replace(regex, '<mark>$1</mark>');
+    }
+
+    function renderNoteList() {
+      const filtered = getFilteredNotes();
+      const titleEl = document.getElementById('currentFilterTitle');
+      const subEl = document.getElementById('currentFilterSub');
+
+      if (state.filterType === 'all') titleEl.textContent = 'Tất cả ghi chú';
+      else if (state.filterType === 'pinned') titleEl.textContent = 'Ghi chú đã ghim';
+      else if (state.filterType === 'tag') titleEl.textContent = `#${state.filterTag}`;
+      else if (state.filterType === 'folder') titleEl.textContent = folderName(state.filterFolderId);
+      document.getElementById('btnManageCurrentFolder').hidden = state.filterType !== 'folder' || !state.filterFolderId;
+
+      subEl.textContent = `${filtered.length} ghi chú${state.searchQuery.trim() ? ` · Lọc theo "${state.searchQuery.trim()}"` : ''}`;
+
+      const container = document.getElementById('noteListContainer');
+      if (filtered.length === 0) {
+        if (!container.querySelector('.note-list-empty')) {
+          container.innerHTML = `<div class="empty-state note-list-empty"><span class="empty-state-number" aria-hidden="true">0</span><h3>Chưa có ghi chú</h3><p>Thử đổi từ khóa, bộ lọc hoặc tạo bài đầu tiên cho mục này.</p><button class="btn btn-primary" data-create-note>+ Tạo ghi chú</button></div>`;
+        }
+        return;
+      }
+
+      const listMarkup = filtered
+        .map((note) => {
+          const isActive = note.id === state.activeNoteId;
+          const cleanExcerpt = (note.content || '')
+            .replace(/```[\s\S]*?```/g, '[Khối mã]')
+            .replace(/[#>*`~\[\]]/g, '')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 130);
+
+          const highlightedTitle = highlightPlainText(note.title || 'Không tiêu đề', state.searchQuery);
+          const highlightedExcerpt = highlightPlainText(cleanExcerpt || 'Chưa có nội dung...', state.searchQuery);
+
+          const tagsHtml = (note.tags || [])
+            .map((t) => `<span class="mini-tag">#${highlightPlainText(t, state.searchQuery)}</span>`)
+            .join('');
+
+          return `
+            <div class="note-card ${isActive ? 'active' : ''}" data-note-id="${escapeHtml(note.id)}" draggable="true" tabindex="0" role="button" aria-pressed="${isActive}" aria-label="Mở ghi chú ${escapeHtml(note.title || 'Không tiêu đề')}">
+              <div class="note-card-header">
+                <div class="note-card-title">${highlightedTitle}</div>
+                ${note.pinned ? '<span class="note-card-pin" title="Đã ghim">Ghim</span>' : ''}
+              </div>
+              <div class="note-card-excerpt">${highlightedExcerpt}</div>
+              <div class="note-card-meta">
+                <div class="note-card-tags">${tagsHtml}</div>
+                <span class="note-card-date">${formatDateTime(note.updatedAt)}</span>
+              </div>
+            </div>
+          `;
+        })
+        .join('');
+      syncNoteCards(container, listMarkup);
+    }
+
+    async function renderActiveWorkspace() {
+      const request = ++workspaceUi.request;
+      const note = getActiveNote();
+      const emptyEl = document.getElementById('workspaceEmpty');
+      const activeEl = document.getElementById('workspaceActive');
+      const changed = workspaceUi.noteId !== (note?.id || null);
+      if (changed) {
+        rememberWorkspacePosition();
+        // Không để việc gõ ở bài mới hủy bộ hẹn giờ lưu của bài vừa rời đi.
+        const previousNote = state.notes.find(n => n.id === workspaceUi.noteId);
+        if (state.saveTimer && previousNote) {
+          clearTimeout(state.saveTimer); state.saveTimer = null;
+          void persistNoteAndCheckVersion(previousNote);
+        }
+      }
+      workspaceUi.noteId = note?.id || null;
+      if (!note) {
+        ++workspaceUi.previewRequest;
+        emptyEl.style.display = 'flex'; activeEl.style.display = 'none';
+        return;
+      }
+      emptyEl.style.display = 'none'; activeEl.style.display = 'flex';
+      if (changed) setSaveStatus('saved');
+      const titleInput = document.getElementById('noteTitleInput');
+      const mdInput = document.getElementById('markdownInput');
+      if (changed || document.activeElement !== titleInput) titleInput.value = note.title || '';
+      if (changed || document.activeElement !== mdInput) mdInput.value = note.content || '';
+      document.getElementById('btnPinNote').textContent = note.pinned ? 'Bỏ ghim' : 'Ghim';
+      renderNoteFolderSelect(note); renderActiveNoteTags(note);
+      updateWordCount(note.content || '');
+      const previewTask = renderPreviewAndBacklinks(note);
+      const preview = document.getElementById('previewPane');
+      const position = workspaceUi.positions.get(note.id) || {editor:0, preview:0, start:0, end:0};
+      if (changed) {
+        mdInput.scrollTop = position.editor;
+        mdInput.setSelectionRange(position.start, position.end);
+        preview.scrollTop = position.preview;
+        playSurfaceMotion(document.querySelector('.workspace-heading'));
+        playSurfaceMotion(document.getElementById('editorBody'), false);
+      }
+      const restoredTop = preview.scrollTop;
+      await previewTask;
+      if (request !== workspaceUi.request || note.id !== state.activeNoteId) return;
+      if (changed && preview.scrollTop === restoredTop) preview.scrollTop = position.preview;
+      await updateVersionCountBadge(note.id);
+    }
+
+    function renderActiveNoteTags(note) {
+      const container = document.getElementById('activeNoteTags');
+      const tags = note.tags || [];
+      container.innerHTML = tags
+        .map(
+          (tag) => `
+          <span class="tag-chip">
+            #${escapeHtml(tag)}
+            <button class="tag-chip-remove" data-remove-tag="${escapeHtml(tag)}" title="Xóa tag">×</button>
+          </span>
+        `
+        )
+        .join('');
+    }
+
+    function updateWordCount(content) {
+      const text = (content || '').trim();
+      const words = text ? text.split(/\s+/).length : 0;
+      const chars = (content || '').length;
+      document.getElementById('wordCountLabel').textContent = `${words} từ · ${chars} ký tự`;
+    }
+
+    async function renderPreviewAndBacklinks(note) {
+      const previewRequest = ++workspaceUi.previewRequest;
+      const previewEl = document.getElementById('markdownPreview');
+      const backlinksEl = document.getElementById('backlinksContainer');
+
+      previewEl.innerHTML = renderMarkdownWithExtensions(note.content || '', { highlightSearch: true });
+      await resolveIdbImagesInContainer(previewEl);
+      if (previewRequest !== workspaceUi.previewRequest || note.id !== state.activeNoteId) return;
+
+      const backlinks = computeBacklinksForNote(note);
+      if (backlinks.length === 0) {
+        backlinksEl.innerHTML = `
+          <div class="backlinks-title">Liên kết ngược (Backlinks) · 0</div>
+          <div style="font-size:14px; color:var(--text-muted);">
+            Chưa có ghi chú nào trỏ tới bài này. Đặt <code>[[${escapeHtml(note.title || 'Tiêu đề')}]]</code> ở ghi chú khác để tạo liên kết.
+          </div>
+        `;
+      } else {
+        backlinksEl.innerHTML = `
+          <div class="backlinks-title">Liên kết ngược (Backlinks) · ${backlinks.length}</div>
+          <div class="backlink-list">
+            ${backlinks
+              .map((b) => {
+                const snippet = (b.content || '').replace(/[#*`]/g, '').slice(0, 100);
+                return `
+                  <div class="backlink-item" data-open-note-id="${b.id}">
+                    <div class="backlink-item-title">${escapeHtml(b.title || 'Không tiêu đề')}</div>
+                    <div class="backlink-item-snippet">${escapeHtml(snippet)}</div>
+                  </div>
+                `;
+              })
+              .join('')}
+          </div>
+        `;
+      }
+    }
+
+    /* =========================================================================
+       === SECTION: TỰ ĐỘNG LƯU (DEBOUNCE 800MS) & LỊCH SỬ PHIÊN BẢN ===
+       ========================================================================= */
+    function handleEditorInput() {
+      const note = getActiveNote();
+      if (!note) return;
+
+      const titleVal = document.getElementById('noteTitleInput').value;
+      const contentVal = document.getElementById('markdownInput').value;
+
+      note.title = titleVal;
+      note.content = contentVal;
+      note.updatedAt = Date.now();
+
+      setSaveStatus('saving');
+      updateWordCount(contentVal);
+      renderPreviewAndBacklinks(note);
+      renderNoteList();
+
+      if (state.saveTimer) clearTimeout(state.saveTimer);
+      state.saveTimer = setTimeout(() => {
+        state.saveTimer = null;
+        persistNoteAndCheckVersion(note);
+      }, 800);
+    }
+
+    async function persistNoteAndCheckVersion(note, forceSnapshot = false) {
+      try {
+        const now = Date.now();
+        const contentChanged = (note.content || '').trim() !== (note.lastVersionContent || '').trim();
+        const elapsedSinceLastVersion = now - (note.lastVersionAt || 0);
+
+        if (forceSnapshot || (contentChanged && elapsedSinceLastVersion >= VERSION_INTERVAL_MS)) {
+          await saveNoteVersionSnapshot(note);
+          note.lastVersionAt = now;
+          note.lastVersionContent = note.content;
+        }
+
+        await idbPut('notes', note);
+        if (note.id === state.activeNoteId) setSaveStatus('saved');
+        renderSidebar();
+        await updateVersionCountBadge(note.id);
+      } catch (err) {
+        console.error('Lỗi lưu ghi chú vào IndexedDB:', err);
+        if (note.id === state.activeNoteId) setSaveStatus('error');
+        showToast('Lỗi lưu dữ liệu vào IndexedDB: ' + err.message, 'error');
+      }
+    }
+
+    async function getVersionsForNote(noteId) {
+      const allVersions = await idbGetAll('versions');
+      return allVersions
+        .filter((v) => v.noteId === noteId)
+        .sort((a, b) => b.savedAt - a.savedAt);
+    }
+
+    async function saveNoteVersionSnapshot(note) {
+      const versionRecord = {
+        id: generateId('ver'),
+        noteId: note.id,
+        title: note.title || 'Không tiêu đề',
+        content: note.content || '',
+        savedAt: Date.now()
+      };
+      await idbPut('versions', versionRecord);
+
+      const existing = await getVersionsForNote(note.id);
+      if (existing.length > MAX_VERSIONS_PER_NOTE) {
+        const toRemove = existing.slice(MAX_VERSIONS_PER_NOTE);
+        for (const oldVer of toRemove) {
+          await idbDelete('versions', oldVer.id);
+        }
+      }
+    }
+
+    async function updateVersionCountBadge(noteId) {
+      const versions = await getVersionsForNote(noteId);
+      if (noteId !== state.activeNoteId) return;
+      document.getElementById('versionCountBadge').textContent = versions.length;
+    }
+
+    /* =========================================================================
+       === SECTION: THAO TÁC GHI CHÚ (TẠO MỚI, GHIM, XÓA, ĐỔI CHẾ ĐỘ XEM) ===
+       ========================================================================= */
+    async function createNewNote(initialTitle = 'Ghi chú mới', initialContent = '') {
+      const now = Date.now();
+      const newNote = {
+        id: generateId('note'),
+        title: initialTitle,
+        content: initialContent || `# ${initialTitle}\n\n`,
+        folderId: state.filterType === 'folder' ? state.filterFolderId : null,
+        tags: state.filterType === 'tag' && state.filterTag ? [state.filterTag] : [],
+        pinned: false,
+        createdAt: now,
+        updatedAt: now,
+        lastVersionAt: now,
+        lastVersionContent: ''
+      };
+
+      try {
+        await idbPut('notes', newNote);
+        state.notes.unshift(newNote);
+        state.activeNoteId = newNote.id;
+        if (window.innerWidth <= 760) { state.sidebarCollapsed=true; state.noteListCollapsed=true; applyPanelVisibility(); }
+        renderSidebar();
+        renderNoteList();
+        await renderActiveWorkspace();
+
+        const titleInput = document.getElementById('noteTitleInput');
+        titleInput.focus();
+        titleInput.select();
+        showToast('Đã tạo ghi chú mới', 'success');
+      } catch (err) {
+        showToast('Không thể tạo ghi chú: ' + err.message, 'error');
+      }
+    }
+
+    async function togglePinActiveNote() {
+      const note = getActiveNote();
+      if (!note) return;
+      note.pinned = !note.pinned;
+      note.updatedAt = Date.now();
+      await idbPut('notes', note);
+      renderSidebar();
+      renderNoteList();
+      await renderActiveWorkspace();
+      showToast(note.pinned ? 'Đã ghim ghi chú lên đầu' : 'Đã bỏ ghim ghi chú');
+    }
+
+    function openDeleteConfirmModal() {
+      const note = getActiveNote();
+      if (!note) return;
+      document.getElementById('deleteNoteTitleLabel').textContent = `"${note.title || 'Không tiêu đề'}"`;
+      document.getElementById('modalDeleteConfirm').classList.add('open');
+    }
+
+    async function confirmDeleteActiveNote() {
+      const note = getActiveNote();
+      if (!note) return;
+
+      try {
+        await idbDelete('notes', note.id);
+        const versions = await getVersionsForNote(note.id);
+        for (const v of versions) {
+          await idbDelete('versions', v.id);
+        }
+
+        state.notes = state.notes.filter((n) => n.id !== note.id);
+        const remaining = getFilteredNotes();
+        state.activeNoteId = remaining.length > 0 ? remaining[0].id : (state.notes[0]?.id || null);
+
+        document.getElementById('modalDeleteConfirm').classList.remove('open');
+        renderSidebar();
+        renderNoteList();
+        await renderActiveWorkspace();
+        showToast('Đã xóa ghi chú', 'info');
+      } catch (err) {
+        showToast('Lỗi khi xóa ghi chú: ' + err.message, 'error');
+      }
+    }
+
+    function setViewMode(mode) {
+      if (!['edit', 'split', 'preview'].includes(mode)) return;
+      const changed = state.viewMode !== mode;
+      state.viewMode = mode;
+      const body = document.getElementById('editorBody');
+      body.className = `editor-body mode-${mode}`;
+      document.querySelectorAll('.mode-btn').forEach((btn) => {
+        btn.classList.toggle('active', btn.dataset.mode === mode);
+        btn.setAttribute('aria-pressed', String(btn.dataset.mode === mode));
+      });
+      if (changed) playSurfaceMotion(body, false, 180);
+    }
+
+    function cycleViewMode() {
+      const order = ['edit', 'split', 'preview'];
+      const next = order[(order.indexOf(state.viewMode) + 1) % order.length];
+      setViewMode(next);
+    }
+
+    /* =========================================================================
+       === SECTION: FLASHCARD TRÍCH XUẤT & ÔN TẬP (Q:: / A::) ===
+       ========================================================================= */
+    function extractAllFlashcards(filterTag = '') {
+      const cards = [];
+      const regex = /^Q::\s*(.+?)\r?\nA::\s*(.+)$/gm;
+
+      for (const note of state.notes) {
+        if (filterTag) {
+          const hasTag = (note.tags || []).some((t) => t.toLowerCase() === filterTag.toLowerCase());
+          if (!hasTag) continue;
+        }
+        const content = note.content || '';
+        let match;
+        regex.lastIndex = 0;
+        let idx = 0;
+        while ((match = regex.exec(content)) !== null) {
+          idx++;
+          cards.push({
+            id: `${note.id}_fc_${idx}`,
+            noteId: note.id,
+            noteTitle: note.title || 'Không tiêu đề',
+            tags: note.tags || [],
+            question: match[1].trim(),
+            answer: match[2].trim()
+          });
+        }
+      }
+      return cards;
+    }
+
+    function openFlashcardModal() {
+      const selectEl = document.getElementById('fcTagFilter');
+      const tags = getAllTagsWithCounts();
+      selectEl.innerHTML =
+        `<option value="">Tất cả các Tag</option>` +
+        tags.map(([tag, count]) => `<option value="${escapeHtml(tag)}">#${escapeHtml(tag)} (${count} bài)</option>`).join('');
+
+      startFlashcardSession('');
+      document.getElementById('modalFlashcards').classList.add('open');
+    }
+
+    function startFlashcardSession(tagFilter = '', customQueue = null) {
+      state.flashcards = extractAllFlashcards(tagFilter);
+      state.fcQueue = customQueue ? [...customQueue] : [...state.flashcards];
+      state.fcCurrentIndex = 0;
+      state.fcFlipped = false;
+      state.fcRememberedIds.clear();
+      state.fcForgotIds.clear();
+      renderCurrentFlashcard();
+    }
+
+    function renderCurrentFlashcard() {
+      const emptyEl = document.getElementById('fcEmptyState');
+      const activeEl = document.getElementById('fcActiveArea');
+      const summaryEl = document.getElementById('fcSummaryArea');
+      const statsEl = document.getElementById('fcStatsLabel');
+
+      const total = state.fcQueue.length;
+      if (total === 0) {
+        emptyEl.style.display = 'flex';
+        activeEl.style.display = 'none';
+        summaryEl.style.display = 'none';
+        statsEl.textContent = '0 thẻ';
+        return;
+      }
+
+      if (state.fcCurrentIndex >= total) {
+        emptyEl.style.display = 'none';
+        activeEl.style.display = 'none';
+        summaryEl.style.display = 'block';
+        const remCount = state.fcRememberedIds.size;
+        const forCount = state.fcForgotIds.size;
+        document.getElementById('fcSummaryText').textContent = `Bạn đã nhớ ${remCount}/${total} thẻ. Cần ôn lại ${forCount} thẻ.`;
+        document.getElementById('btnFcRetryMissed').style.display = forCount > 0 ? 'inline-flex' : 'none';
+        return;
+      }
+
+      emptyEl.style.display = 'none';
+      activeEl.style.display = 'block';
+      summaryEl.style.display = 'none';
+
+      const currentCard = state.fcQueue[state.fcCurrentIndex];
+      statsEl.textContent = `Thẻ ${state.fcCurrentIndex + 1}/${total} · Đã nhớ: ${state.fcRememberedIds.size} · Chưa nhớ: ${state.fcForgotIds.size}`;
+
+      const badgeEl = document.getElementById('fcSideBadge');
+      const sourceEl = document.getElementById('fcSourceNote');
+      const contentEl = document.getElementById('fcCardContent');
+
+      badgeEl.textContent = state.fcFlipped ? 'ĐÁP ÁN (A)' : 'CÂU HỎI (Q)';
+      sourceEl.textContent = `Bài: ${currentCard.noteTitle}`;
+      const rawText = state.fcFlipped ? currentCard.answer : currentCard.question;
+      contentEl.innerHTML = renderMarkdownWithExtensions(rawText, { highlightSearch: false });
+    }
+
+    /* =========================================================================
+       === SECTION: XUẤT FILE .MD, IN PDF & SAO LƯU / KHÔI PHỤC .JSON ===
+       ========================================================================= */
+    function exportActiveNoteAsMarkdown() {
+      const note = getActiveNote();
+      if (!note) return;
+      const safeFilename = (note.title || 'ghi-chu').replace(/[\\/:*?"<>|]/g, '_') + '.md';
+      const blob = new Blob([note.content || ''], { type: 'text/markdown;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = safeFilename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      showToast(`Đã tải xuống ${safeFilename}`, 'success');
+    }
+
+    function blobToBase64(blob) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+    }
+
+    async function base64ToBlob(dataUrl) {
+      const res = await fetch(dataUrl);
+      return await res.blob();
+    }
+
+    async function exportFullBackupJson() {
+      try {
+        const notes = await idbGetAll('notes');
+        const versions = await idbGetAll('versions');
+        const rawImages = await idbGetAll('images');
+        const fontMeta = await idbGet('meta', 'fontSettings');
+
+        const encodedImages = [];
+        for (const img of rawImages) {
+          if (img.blob) {
+            const dataUrl = await blobToBase64(img.blob);
+            encodedImages.push({
+              id: img.id,
+              mimeType: img.mimeType || img.blob.type,
+              createdAt: img.createdAt,
+              dataUrl: dataUrl
+            });
+          }
+        }
+
+        const now = Date.now();
+        const backupPayload = {
+          app: 'NoteLabVN',
+          phase: 2,
+          exportedAt: now,
+          fontSettings: fontMeta ? fontMeta.value : state.fontSettings,
+          folders: state.folders,
+          schemaVersion: 3,
+          notes,
+          versions,
+          images: encodedImages
+        };
+
+        const jsonString = JSON.stringify(backupPayload, null, 2);
+        const blob = new Blob([jsonString], { type: 'application/json;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const dateStr = new Date(now).toISOString().slice(0, 10);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `notelab-vn-backup-${dateStr}.json`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+
+        await idbPut('meta', { key: 'lastBackupAt', value: now });
+        await checkAndRenderBackupStatus();
+        showToast('Đã xuất file sao lưu (.json) kèm cài đặt chữ thành công!', 'success');
+      } catch (err) {
+        console.error('Lỗi xuất sao lưu:', err);
+        showToast('Lỗi khi xuất sao lưu: ' + err.message, 'error');
+      }
+    }
+
+    async function applyImportedBackup(mode = 'merge') {
+      const data = state.pendingImportData;
+      if (!data) return;
+      try { normalizeFolders(data.folders); } catch (err) { showToast(err.message, 'error'); return; }
+
+      try {
+        if (mode === 'overwrite') {
+          await idbClear('notes');
+          await idbClear('versions');
+          await idbClear('images');
+        }
+
+        for (const note of data.notes || []) {
+          await idbPut('notes', note);
+        }
+        for (const ver of data.versions || []) {
+          await idbPut('versions', ver);
+        }
+        for (const img of data.images || []) {
+          if (img.dataUrl) {
+            const blob = await base64ToBlob(img.dataUrl);
+            await idbPut('images', {
+              id: img.id,
+              blob: blob,
+              mimeType: img.mimeType || blob.type,
+              createdAt: img.createdAt || Date.now()
+            });
+          }
+        }
+
+        const importedFolders = normalizeFolders(data.folders);
+        const mergedFolders = mode === 'overwrite' ? importedFolders : Array.from(new Map([...state.folders, ...importedFolders].map(f => [f.id, f])).values());
+        await commitFolderChanges(mergedFolders);
+
+        // Khôi phục cài đặt font nếu trong file sao lưu có mục fontSettings (tương thích ngược)
+        if (data.fontSettings && typeof data.fontSettings === 'object') {
+          state.fontSettings = normalizeFontSettings(data.fontSettings);
+          await saveAndApplyFontSettings(state.fontSettings);
+        }
+
+        await migrateLegacySampleNotes();
+        state.notes = await idbGetAll('notes');
+        if (state.filterType === 'folder' && state.filterFolderId && !state.folders.some(f => f.id === state.filterFolderId)) { state.filterType = 'all'; state.filterFolderId = null; }
+        const sorted = getFilteredNotes();
+        state.activeNoteId = sorted[0]?.id || null;
+        state.pendingImportData = null;
+
+        document.getElementById('modalImportBackup').classList.remove('open');
+        renderSidebar();
+        renderNoteList();
+        await renderActiveWorkspace();
+        showToast(mode === 'overwrite' ? 'Đã ghi đè dữ liệu từ bản sao lưu!' : 'Đã gộp dữ liệu từ bản sao lưu!', 'success');
+      } catch (err) {
+        showToast('Lỗi khôi phục sao lưu: ' + err.message, 'error');
+      }
+    }
+
+    async function checkAndRenderBackupStatus() {
+      const meta = await idbGet('meta', 'lastBackupAt');
+      const remindAfterMeta = await idbGet('meta', 'remindBackupAfter');
+      const lastBackupAt = meta ? meta.value : 0;
+      const remindAfter = remindAfterMeta ? remindAfterMeta.value : 0;
+
+      const labelEl = document.getElementById('lastBackupLabel');
+      labelEl.textContent = lastBackupAt ? `Sao lưu cuối: ${formatDateTime(lastBackupAt)}` : 'Sao lưu cuối: Chưa có';
+
+      const now = Date.now();
+      const overdue = now - lastBackupAt > BACKUP_REMINDER_MS && now > remindAfter;
+      document.getElementById('backupBanner').classList.toggle('show', overdue);
+    }
+
+    /* =========================================================================
+       === SECTION: TÙY CHỈNH FONT CHỮ TOÀN ỨNG DỤNG (4 NHÓM ĐỘC LẬP) ===
+       ========================================================================= */
+    const FONT_PRESETS = [
+      { value: 'Times New Roman', label: 'Times New Roman (Mặc định học thuật)', category: 'Serif', google: false },
+      { value: 'system', label: 'Font hệ thống (System UI)', category: 'Hệ thống', google: false },
+      { value: 'Inter', label: 'Inter (Sans-serif)', category: 'Sans', google: true },
+      { value: 'Be Vietnam Pro', label: 'Be Vietnam Pro (Sans-serif Việt hóa)', category: 'Sans', google: true },
+      { value: 'Roboto', label: 'Roboto (Sans-serif)', category: 'Sans', google: true },
+      { value: 'Noto Sans', label: 'Noto Sans (Sans-serif)', category: 'Sans', google: true },
+      { value: 'Source Sans 3', label: 'Source Sans 3 (Sans-serif)', category: 'Sans', google: true },
+      { value: 'Merriweather', label: 'Merriweather (Serif)', category: 'Serif', google: true },
+      { value: 'Lora', label: 'Lora (Serif)', category: 'Serif', google: true },
+      { value: 'Noto Serif', label: 'Noto Serif (Serif)', category: 'Serif', google: true },
+      { value: 'JetBrains Mono', label: 'JetBrains Mono (Monospace)', category: 'Mono', google: true },
+      { value: 'Fira Code', label: 'Fira Code (Monospace)', category: 'Mono', google: true },
+      { value: 'Source Code Pro', label: 'Source Code Pro (Monospace)', category: 'Mono', google: true },
+      { value: 'IBM Plex Mono', label: 'IBM Plex Mono (Monospace)', category: 'Mono', google: true }
+    ];
+
+    const FONT_STACK_MAP = {
+      'system': 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+      'Times New Roman': '"Times New Roman", Times, Georgia, serif',
+      'Inter': '"Inter", system-ui, -apple-system, sans-serif',
+      'Roboto': '"Roboto", system-ui, -apple-system, sans-serif',
+      'Noto Sans': '"Noto Sans", system-ui, -apple-system, sans-serif',
+      'Be Vietnam Pro': '"Be Vietnam Pro", system-ui, -apple-system, sans-serif',
+      'Source Sans 3': '"Source Sans 3", system-ui, -apple-system, sans-serif',
+      'Merriweather': '"Merriweather", "Times New Roman", Georgia, serif',
+      'Lora': '"Lora", "Times New Roman", Georgia, serif',
+      'Noto Serif': '"Noto Serif", "Times New Roman", Georgia, serif',
+      'JetBrains Mono': '"JetBrains Mono", Consolas, monospace',
+      'Fira Code': '"Fira Code", Consolas, monospace',
+      'Source Code Pro': '"Source Code Pro", Consolas, monospace',
+      'IBM Plex Mono': '"IBM Plex Mono", Consolas, monospace'
+    };
+
+    function getDefaultFontGroup(groupKey) {
+      if (groupKey === 'ui') return { preset: 'system', custom: '', size: 15, lh: 1.55 };
+      if (groupKey === 'editor') return { preset: 'Times New Roman', custom: '', size: 17, lh: 1.7 };
+      if (groupKey === 'preview') {
+        return {
+          preset: 'Times New Roman',
+          custom: '',
+          size: 17,
+          lh: 1.75,
+          maxWidth: state.noteContentWidth || 860,
+          fullWidth: Boolean(state.noteFullWidth)
+        };
+      }
+      return { preset: 'JetBrains Mono', custom: '', size: 14, lh: 1.5 };
+    }
+
+    function getDefaultFontSettings() {
+      return {
+        ui: getDefaultFontGroup('ui'),
+        editor: getDefaultFontGroup('editor'),
+        preview: getDefaultFontGroup('preview'),
+        code: getDefaultFontGroup('code')
+      };
+    }
+
+    function normalizeFontSettings(raw) {
+      const defaults = getDefaultFontSettings();
+      if (!raw || typeof raw !== 'object') return defaults;
+      const clamp = (val, min, max, fb) => {
+        const num = Number(val);
+        return isNaN(num) ? fb : Math.min(max, Math.max(min, num));
+      };
+      return {
+        ui: {
+          preset: FONT_STACK_MAP[raw.ui?.preset] ? raw.ui.preset : defaults.ui.preset,
+          custom: String(raw.ui?.custom || '').slice(0, 80),
+          size: clamp(raw.ui?.size, 12, 28, defaults.ui.size),
+          lh: clamp(raw.ui?.lh, 1.2, 2.2, defaults.ui.lh)
+        },
+        editor: {
+          preset: FONT_STACK_MAP[raw.editor?.preset] ? raw.editor.preset : defaults.editor.preset,
+          custom: String(raw.editor?.custom || '').slice(0, 80),
+          size: clamp(raw.editor?.size, 12, 28, defaults.editor.size),
+          lh: clamp(raw.editor?.lh, 1.2, 2.2, defaults.editor.lh)
+        },
+        preview: {
+          preset: FONT_STACK_MAP[raw.preview?.preset] ? raw.preview.preset : defaults.preview.preset,
+          custom: String(raw.preview?.custom || '').slice(0, 80),
+          size: clamp(raw.preview?.size, 12, 28, defaults.preview.size),
+          lh: clamp(raw.preview?.lh, 1.2, 2.2, defaults.preview.lh),
+          maxWidth: clamp(raw.preview?.maxWidth, 600, 1100, defaults.preview.maxWidth),
+          fullWidth: Boolean(raw.preview?.fullWidth)
+        },
+        code: {
+          preset: FONT_STACK_MAP[raw.code?.preset] ? raw.code.preset : defaults.code.preset,
+          custom: String(raw.code?.custom || '').slice(0, 80),
+          size: clamp(raw.code?.size, 12, 28, defaults.code.size),
+          lh: clamp(raw.code?.lh, 1.2, 2.2, defaults.code.lh)
+        }
+      };
+    }
+
+    function loadGoogleFontIfNeeded(presetName) {
+      const found = FONT_PRESETS.find((f) => f.value === presetName && f.google);
+      if (!found) return;
+      const linkId = 'gf-' + presetName.toLowerCase().replace(/\s+/g, '-');
+      if (document.getElementById(linkId)) return;
+      const link = document.createElement('link');
+      link.id = linkId;
+      link.rel = 'stylesheet';
+      link.href = `https://fonts.googleapis.com/css2?family=${encodeURIComponent(presetName)}:ital,wght@0,400;0,600;0,700;1,400&display=swap`;
+      document.head.appendChild(link);
+    }
+
+    function buildCssFontStack(groupCfg, fallbackStack) {
+      const presetStack = FONT_STACK_MAP[groupCfg.preset] || fallbackStack;
+      const customClean = (groupCfg.custom || '').trim().replace(/["'<>]/g, '');
+      if (customClean) {
+        return `"${customClean}", ${presetStack}`;
+      }
+      return presetStack;
+    }
+
+    function applyFontSettingsToDom(settings) {
+      const cfg = normalizeFontSettings(settings);
+      state.fontSettings = cfg;
+
+      ['ui', 'editor', 'preview', 'code'].forEach((k) => {
+        loadGoogleFontIfNeeded(cfg[k].preset);
+      });
+
+      const root = document.documentElement;
+      root.style.setProperty('--font-ui', buildCssFontStack(cfg.ui, FONT_STACK_MAP['Times New Roman']));
+      root.style.setProperty('--size-ui', `${cfg.ui.size}px`);
+      root.style.setProperty('--lh-ui', String(cfg.ui.lh));
+
+      root.style.setProperty('--font-editor', buildCssFontStack(cfg.editor, FONT_STACK_MAP['Times New Roman']));
+      root.style.setProperty('--size-editor', `${cfg.editor.size}px`);
+      root.style.setProperty('--lh-editor', String(cfg.editor.lh));
+
+      root.style.setProperty('--font-preview', buildCssFontStack(cfg.preview, FONT_STACK_MAP['Times New Roman']));
+      root.style.setProperty('--size-preview', `${cfg.preview.size}px`);
+      root.style.setProperty('--lh-preview', String(cfg.preview.lh));
+
+      root.style.setProperty('--font-code', buildCssFontStack(cfg.code, FONT_STACK_MAP['JetBrains Mono']));
+      root.style.setProperty('--size-code', `${cfg.code.size}px`);
+      root.style.setProperty('--lh-code', String(cfg.code.lh));
+
+      // Đồng bộ độ rộng cột đọc với thanh trượt trên toolbar
+      state.noteContentWidth = cfg.preview.maxWidth;
+      state.noteFullWidth = cfg.preview.fullWidth;
+      applyNoteContentWidth();
+
+      localStorage.setItem('notelab_font_settings_cache', JSON.stringify(cfg));
+    }
+
+    async function saveAndApplyFontSettings(settings) {
+      applyFontSettingsToDom(settings);
+      if (state.db) {
+        try {
+          await idbPut('meta', { key: 'fontSettings', value: state.fontSettings });
+        } catch (err) {
+          console.warn('Không thể lưu fontSettings vào IndexedDB:', err);
+        }
+      }
+    }
+
+    async function loadFontSettingsFromIdb() {
+      let cached = null;
+      try {
+        const raw = localStorage.getItem('notelab_font_settings_cache');
+        if (raw) cached = JSON.parse(raw);
+      } catch (e) {}
+
+      if (state.db) {
+        try {
+          const metaRecord = await idbGet('meta', 'fontSettings');
+          if (metaRecord && metaRecord.value) {
+            cached = metaRecord.value;
+          }
+        } catch (e) {}
+      }
+      const normalized = normalizeFontSettings(cached);
+      await saveAndApplyFontSettings(normalized);
+    }
+
+    function populateFontSettingsModalInputs() {
+      const cfg = state.fontSettings || getDefaultFontSettings();
+      const optionsHtml = FONT_PRESETS.map(
+        (f) => `<option value="${escapeHtml(f.value)}">[${escapeHtml(f.category)}] ${escapeHtml(f.label)}</option>`
+      ).join('');
+
+      ['ui', 'editor', 'preview', 'code'].forEach((group) => {
+        const selectEl = document.getElementById(`fontPreset_${group}`);
+        const customEl = document.getElementById(`fontCustom_${group}`);
+        const sizeEl = document.getElementById(`fontSize_${group}`);
+        const sizeValEl = document.getElementById(`fontSizeVal_${group}`);
+        const lhEl = document.getElementById(`fontLh_${group}`);
+        const lhValEl = document.getElementById(`fontLhVal_${group}`);
+
+        if (selectEl && !selectEl.innerHTML) selectEl.innerHTML = optionsHtml;
+        if (selectEl) selectEl.value = cfg[group].preset;
+        if (customEl) customEl.value = cfg[group].custom || '';
+        if (sizeEl) sizeEl.value = cfg[group].size;
+        if (sizeValEl) sizeValEl.textContent = `${cfg[group].size}px`;
+        if (lhEl) lhEl.value = cfg[group].lh;
+        if (lhValEl) lhValEl.textContent = String(cfg[group].lh);
+      });
+
+      const widthEl = document.getElementById('fontWidth_preview');
+      const widthValEl = document.getElementById('fontWidthVal_preview');
+      const fullWidthEl = document.getElementById('fontFullWidth_preview');
+      if (widthEl) {
+        widthEl.value = cfg.preview.maxWidth;
+        widthEl.disabled = cfg.preview.fullWidth;
+      }
+      if (widthValEl) {
+        widthValEl.textContent = cfg.preview.fullWidth ? 'Toàn chiều rộng' : `${cfg.preview.maxWidth}px`;
+      }
+      if (fullWidthEl) {
+        fullWidthEl.checked = Boolean(cfg.preview.fullWidth);
+      }
+    }
+
+    function openFontSettingsModal() {
+      populateFontSettingsModalInputs();
+      document.getElementById('modalFontSettings').classList.add('open');
+    }
+
+    function readFontSettingsFromModalAndApply() {
+      const next = getDefaultFontSettings();
+      ['ui', 'editor', 'preview', 'code'].forEach((group) => {
+        next[group].preset = document.getElementById(`fontPreset_${group}`).value;
+        next[group].custom = document.getElementById(`fontCustom_${group}`).value.trim();
+        next[group].size = parseInt(document.getElementById(`fontSize_${group}`).value, 10);
+        next[group].lh = parseFloat(document.getElementById(`fontLh_${group}`).value);
+        document.getElementById(`fontSizeVal_${group}`).textContent = `${next[group].size}px`;
+        document.getElementById(`fontLhVal_${group}`).textContent = String(next[group].lh);
+      });
+
+      const wSlider = document.getElementById('fontWidth_preview');
+      const fullChk = document.getElementById('fontFullWidth_preview');
+      next.preview.maxWidth = parseInt(wSlider.value, 10) || 860;
+      next.preview.fullWidth = Boolean(fullChk.checked);
+      wSlider.disabled = next.preview.fullWidth;
+      document.getElementById('fontWidthVal_preview').textContent = next.preview.fullWidth
+        ? 'Toàn chiều rộng'
+        : `${next.preview.maxWidth}px`;
+
+      saveAndApplyFontSettings(next);
+    }
+
+    /* =========================================================================
+       === SECTION: HẠ TẦNG CHỈNH SỬA, CHÈN & XUẤT SVG/PNG KHỐI ĐẶC BIỆT ===
+       ========================================================================= */
+    function parseBlockIndexFromId(blockType, blockId, cardElement) {
+      if (blockId && blockId.startsWith(blockType + '_')) {
+        const parsed = parseInt(blockId.slice(blockType.length + 1), 10);
+        if (!isNaN(parsed) && parsed >= 0) return parsed;
+      }
+      const allCards = Array.from(
+        document.querySelectorAll(`#markdownPreview .special-block-card[data-block-type="${blockType}"]`)
+      );
+      const domIdx = allCards.indexOf(cardElement);
+      return domIdx >= 0 ? domIdx : 0;
+    }
+
+    function getNthBlockCodeFromMarkdown(markdown, blockType, targetIndex) {
+      const regex = /```([a-zA-Z0-9_-]*)\r?\n([\s\S]*?)```/g;
+      let match;
+      let count = 0;
+      while ((match = regex.exec(String(markdown || ''))) !== null) {
+        const lang = (match[1] || '').trim().toLowerCase();
+        if (lang === blockType) {
+          if (count === targetIndex) {
+            return match[2].replace(/\r?\n$/, '');
+          }
+          count++;
+        }
+      }
+      return null;
+    }
+
+    function replaceNthBlockInMarkdown(markdown, blockType, targetIndex, newCode) {
+      const regex = /```([a-zA-Z0-9_-]*)\r?\n([\s\S]*?)```/g;
+      let count = 0;
+      const cleanCode = String(newCode || '').replace(/\r?\n$/, '');
+      return String(markdown || '').replace(regex, (fullMatch, lang) => {
+        const cleanLang = (lang || '').trim().toLowerCase();
+        if (cleanLang === blockType) {
+          if (count === targetIndex) {
+            count++;
+            return '```' + blockType + '\n' + cleanCode + '\n```';
+          }
+          count++;
+        }
+        return fullMatch;
+      });
+    }
+
+    function openBlockEditorModal(blockType, blockIndex) {
+      const note = getActiveNote();
+      if (!note) return;
+
+      const existingCode = getNthBlockCodeFromMarkdown(note.content || '', blockType, blockIndex);
+      if (existingCode === null) {
+        showToast('Không tìm thấy khối tương ứng trong nội dung ghi chú.', 'error');
+        return;
+      }
+
+      state.blockEditor.isOpen = true;
+      state.blockEditor.blockType = blockType;
+      state.blockEditor.blockIndex = blockIndex;
+      state.blockEditor.initialCode = existingCode;
+      state.blockEditor.currentCode = existingCode;
+      state.blockEditor.dirty = false;
+
+      const titleEl = document.getElementById('blockEditorModalTitle');
+      const badgeEl = document.getElementById('blockEditorModalBadge');
+      const toolbarSlot = document.getElementById('blockEditorToolbarSlot');
+      const workspaceEl = document.getElementById('blockEditorWorkspace');
+
+      titleEl.textContent =
+        blockType === 'circuit'
+          ? `Trình vẽ Sơ đồ mạch (Khối #${blockIndex + 1})`
+          : `Trình soạn Giản đồ xung Waveform (Khối #${blockIndex + 1})`;
+      badgeEl.textContent = blockType.toUpperCase();
+      toolbarSlot.innerHTML = '';
+      workspaceEl.innerHTML = '';
+
+      const onCodeChange = (updatedCode) => {
+        state.blockEditor.currentCode = updatedCode;
+        state.blockEditor.dirty = updatedCode.trim() !== state.blockEditor.initialCode.trim();
+      };
+
+      const engine = blockType === 'wave' ? waveEngine : circuitEngine;
+      engine.mountEditor(workspaceEl, existingCode, onCodeChange, toolbarSlot);
+
+      document.getElementById('modalBlockEditor').classList.add('open');
+    }
+
+    function closeBlockEditorModal(forceClose = false) {
+      if (!forceClose && state.blockEditor.dirty) {
+        const ok = window.confirm('Bạn có thay đổi chưa lưu trong khối này. Bạn có chắc muốn hủy và đóng không?');
+        if (!ok) return false;
+      }
+      state.blockEditor.isOpen = false;
+      state.blockEditor.dirty = false;
+      document.getElementById('modalBlockEditor').classList.remove('open');
+      document.getElementById('blockEditorWorkspace').innerHTML = '';
+      document.getElementById('blockEditorToolbarSlot').innerHTML = '';
+      return true;
+    }
+
+    function saveAndCloseBlockEditorModal() {
+      if (!state.blockEditor.isOpen) return;
+      const note = getActiveNote();
+      if (!note) return;
+
+      const updatedMarkdown = replaceNthBlockInMarkdown(
+        note.content || '',
+        state.blockEditor.blockType,
+        state.blockEditor.blockIndex,
+        state.blockEditor.currentCode
+      );
+
+      const mdTextarea = document.getElementById('markdownInput');
+      mdTextarea.value = updatedMarkdown;
+      note.content = updatedMarkdown;
+
+      closeBlockEditorModal(true);
+      handleEditorInput();
+      showToast(`Đã cập nhật khối ${state.blockEditor.blockType.toUpperCase()} #${state.blockEditor.blockIndex + 1}`, 'success');
+    }
+
+    function insertSpecialBlockAtCursor(blockType) {
+      const note = getActiveNote();
+      if (!note) {
+        showToast('Hãy chọn hoặc tạo một ghi chú trước khi chèn khối.', 'error');
+        return;
+      }
+
+      const mdTextarea = document.getElementById('markdownInput');
+      const startPos = mdTextarea.selectionStart || 0;
+      const beforeText = mdTextarea.value.slice(0, startPos);
+
+      // Đếm số khối cùng loại nằm trước vị trí con trỏ để xác định đúng chỉ số của khối vừa chèn
+      const regex = new RegExp('```' + blockType + '\\r?\\n[\\s\\S]*?```', 'gi');
+      const matchesBefore = beforeText.match(regex);
+      const newBlockIndex = matchesBefore ? matchesBefore.length : 0;
+
+      const templateContent = blockType === 'circuit' ? DEFAULT_CIRCUIT_TEMPLATE : DEFAULT_WAVE_TEMPLATE;
+      const prefixNewline = startPos > 0 && !beforeText.endsWith('\n') ? '\n\n' : '';
+      const snippet = `${prefixNewline}\`\`\`${blockType}\n${templateContent}\n\`\`\`\n`;
+
+      insertTextAtCursor(mdTextarea, snippet);
+      handleEditorInput();
+      openBlockEditorModal(blockType, newBlockIndex);
+    }
+
+    function serializeCleanSvgForExport(svgEl, forceLightColor = false) {
+      const clone = svgEl.cloneNode(true);
+      clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+
+      const viewBox = clone.getAttribute('viewBox');
+      let width = parseInt(clone.getAttribute('width'), 10);
+      let height = parseInt(clone.getAttribute('height'), 10);
+      if (viewBox) {
+        const parts = viewBox.trim().split(/[\s,]+/).map(Number);
+        if (parts.length === 4 && !isNaN(parts[2]) && !isNaN(parts[3])) {
+          width = parts[2];
+          height = parts[3];
+        }
+      }
+      if (!width || isNaN(width)) width = 720;
+      if (!height || isNaN(height)) height = 300;
+
+      clone.setAttribute('width', String(width));
+      clone.setAttribute('height', String(height));
+
+      const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+      const strokeColor = forceLightColor ? '#1f2328' : (isDark ? '#e6e8ec' : '#1f2328');
+      clone.style.color = strokeColor;
+
+      const serialized = new XMLSerializer().serializeToString(clone);
+      return { serialized, width, height };
+    }
+
+    function exportBlockSvgElement(cardEl, blockType, blockIndex, format = 'svg', pngBg = 'white') {
+      const svgEl = cardEl.querySelector('svg');
+      if (!svgEl) {
+        showToast('Khối này đang có lỗi cú pháp nên chưa có hình SVG để xuất.', 'error');
+        return;
+      }
+
+      const baseName = `${blockType}-${blockIndex + 1}-${Date.now()}`;
+      if (format === 'svg') {
+        const { serialized } = serializeCleanSvgForExport(svgEl, false);
+        const blob = new Blob([serialized], { type: 'image/svg+xml;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${baseName}.svg`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+        showToast(`Đã xuất file ${baseName}.svg`, 'success');
+        return;
+      }
+
+      // Xuất PNG độ phân giải cao (2x)
+      const { serialized, width, height } = serializeCleanSvgForExport(svgEl, pngBg === 'white');
+      const svgBlob = new Blob([serialized], { type: 'image/svg+xml;charset=utf-8' });
+      const url = URL.createObjectURL(svgBlob);
+      const img = new Image();
+      img.onload = () => {
+        const scale = 2;
+        const canvas = document.createElement('canvas');
+        canvas.width = width * scale;
+        canvas.height = height * scale;
+        const ctx = canvas.getContext('2d');
+        if (pngBg === 'white') {
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+        }
+        ctx.scale(scale, scale);
+        ctx.drawImage(img, 0, 0, width, height);
+        URL.revokeObjectURL(url);
+
+        canvas.toBlob((pngBlob) => {
+          if (!pngBlob) {
+            showToast('Không thể kết xuất ảnh PNG.', 'error');
+            return;
+          }
+          const pngUrl = URL.createObjectURL(pngBlob);
+          const a = document.createElement('a');
+          a.href = pngUrl;
+          a.download = `${baseName}.png`;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          URL.revokeObjectURL(pngUrl);
+          showToast(`Đã xuất file ${baseName}.png`, 'success');
+        }, 'image/png');
+      };
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        showToast('Lỗi khi chuyển đổi SVG sang PNG.', 'error');
+      };
+      img.src = url;
+    }
+
+    /* =========================================================================
+       === SECTION: SỰ KIỆN GIAO DIỆN & PHÍM TẮT ===
+       ========================================================================= */
+    function initTheme() {
+      const savedTheme = localStorage.getItem('notelab_theme') || 'dark';
+      applyTheme(savedTheme);
+    }
+
+    function applyTheme(theme) {
+      document.documentElement.setAttribute('data-theme', theme);
+      localStorage.setItem('notelab_theme', theme);
+      const btn = document.getElementById('btnThemeToggle');
+      btn.textContent = theme === 'dark' ? 'Sáng' : 'Tối';
+    }
+
+    function bindAllEvents() {
+      // Nút đổi giao diện Sáng / Tối
+      document.getElementById('btnThemeToggle').addEventListener('click', () => {
+        const current = document.documentElement.getAttribute('data-theme');
+        applyTheme(current === 'dark' ? 'light' : 'dark');
+      });
+
+      // Nút ẩn / hiện thanh Tab (Sidebar) và Danh sách ghi chú
+      document.getElementById('btnCollapseSidebar').addEventListener('click', toggleSidebarPanel);
+      document.getElementById('btnToggleSidebarTop').addEventListener('click', toggleSidebarPanel);
+      document.getElementById('btnCollapseNoteList').addEventListener('click', toggleNoteListPanel);
+      document.getElementById('btnToggleNoteListTop').addEventListener('click', toggleNoteListPanel);
+      document.getElementById('btnEmptyShowPanels').addEventListener('click', () => {
+        state.sidebarCollapsed = false;
+        state.noteListCollapsed = false;
+        applyPanelVisibility();
+      });
+
+      // Tùy chỉnh độ rộng phần Take Note
+      const widthSlider = document.getElementById('noteWidthSlider');
+      widthSlider.addEventListener('input', () => {
+        state.noteFullWidth = false;
+        state.noteContentWidth = parseInt(widthSlider.value, 10);
+        applyNoteContentWidth();
+      });
+      document.getElementById('btnToggleFullWidth').addEventListener('click', () => {
+        state.noteFullWidth = !state.noteFullWidth;
+        applyNoteContentWidth();
+      });
+
+      // Tìm kiếm tức thì
+      const searchInput = document.getElementById('searchInput');
+      const btnClearSearch = document.getElementById('btnClearSearch');
+      searchInput.addEventListener('input', () => {
+        state.searchQuery = searchInput.value;
+        btnClearSearch.classList.toggle('visible', Boolean(state.searchQuery));
+        renderNoteList();
+        const active = getActiveNote();
+        if (active) renderPreviewAndBacklinks(active);
+      });
+      btnClearSearch.addEventListener('click', () => {
+        searchInput.value = '';
+        state.searchQuery = '';
+        btnClearSearch.classList.remove('visible');
+        renderNoteList();
+        const active = getActiveNote();
+        if (active) renderPreviewAndBacklinks(active);
+      });
+
+      // Bộ lọc Sidebar
+      document.getElementById('navAllNotes').addEventListener('click', () => {
+        state.filterType = 'all';
+        state.filterTag = null;
+        renderSidebar();
+        renderNoteList();
+      });
+      document.getElementById('navPinnedNotes').addEventListener('click', () => {
+        state.filterType = 'pinned';
+        state.filterTag = null;
+        renderSidebar();
+        renderNoteList();
+      });
+      document.getElementById('sidebarTagList').addEventListener('click', (e) => {
+        const btn = e.target.closest('[data-tag]');
+        if (!btn) return;
+        state.filterType = 'tag';
+        state.filterTag = btn.dataset.tag;
+        renderSidebar();
+        renderNoteList();
+      });
+
+      // Chọn ghi chú trong danh sách
+      document.getElementById('noteListContainer').addEventListener('click', async (e) => {
+        if (e.target.closest('[data-create-note]')) { await createNewNote(); return; }
+        const card = e.target.closest('[data-note-id]');
+        if (!card) return;
+        state.activeNoteId = card.dataset.noteId;
+        if (window.innerWidth <= 760) { state.sidebarCollapsed=true; state.noteListCollapsed=true; applyPanelVisibility(); }
+        renderNoteList();
+        await renderActiveWorkspace();
+      });
+
+      // Nút tạo ghi chú mới
+      document.getElementById('btnNewNote').addEventListener('click', () => createNewNote());
+      document.getElementById('btnEmptyNewNote').addEventListener('click', () => createNewNote());
+
+      // Chỉnh sửa tiêu đề & nội dung Markdown
+      document.getElementById('noteTitleInput').addEventListener('input', handleEditorInput);
+      const mdTextarea = document.getElementById('markdownInput');
+      mdTextarea.addEventListener('input', handleEditorInput);
+
+      // Hỗ trợ phím Tab thụt dòng
+      mdTextarea.addEventListener('keydown', (e) => {
+        if (e.key === 'Tab') {
+          e.preventDefault();
+          insertTextAtCursor(mdTextarea, '  ');
+          handleEditorInput();
+        }
+      });
+
+      // Dán ảnh Ctrl+V từ clipboard
+      mdTextarea.addEventListener('paste', (e) => {
+        const items = e.clipboardData?.items;
+        if (!items) return;
+        const imageFiles = [];
+        for (const item of items) {
+          if (item.type.startsWith('image/')) {
+            const file = item.getAsFile();
+            if (file) imageFiles.push(file);
+          }
+        }
+        if (imageFiles.length > 0) {
+          e.preventDefault();
+          handleInsertImageFiles(imageFiles);
+        }
+      });
+
+      // Kéo thả file ảnh vào trình soạn thảo
+      const dropZone = document.getElementById('editorDropZone');
+      dropZone.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        dropZone.classList.add('drag-over');
+      });
+      dropZone.addEventListener('dragleave', () => {
+        dropZone.classList.remove('drag-over');
+      });
+      dropZone.addEventListener('drop', (e) => {
+        e.preventDefault();
+        dropZone.classList.remove('drag-over');
+        if (e.dataTransfer?.files?.length) {
+          handleInsertImageFiles(e.dataTransfer.files);
+        }
+      });
+
+      // Thêm & xóa Tag cho ghi chú hiện tại
+      const tagAddInput = document.getElementById('tagAddInput');
+      tagAddInput.addEventListener('keydown', async (e) => {
+        if (e.key === 'Enter' || e.key === ',') {
+          e.preventDefault();
+          const raw = tagAddInput.value.replace(/,/g, '').trim().toLowerCase();
+          if (!raw) return;
+          const note = getActiveNote();
+          if (!note) return;
+          note.tags = note.tags || [];
+          if (!note.tags.includes(raw)) {
+            note.tags.push(raw);
+            note.updatedAt = Date.now();
+            await idbPut('notes', note);
+            renderActiveNoteTags(note);
+            renderSidebar();
+            renderNoteList();
+          }
+          tagAddInput.value = '';
+        }
+      });
+
+      document.getElementById('activeNoteTags').addEventListener('click', async (e) => {
+        const btn = e.target.closest('[data-remove-tag]');
+        if (!btn) return;
+        const tagToRemove = btn.dataset.removeTag;
+        const note = getActiveNote();
+        if (!note) return;
+        note.tags = (note.tags || []).filter((t) => t !== tagToRemove);
+        note.updatedAt = Date.now();
+        await idbPut('notes', note);
+        renderActiveNoteTags(note);
+        renderSidebar();
+        renderNoteList();
+      });
+
+      // Chuyển đổi chế độ xem (Soạn / Chia đôi / Xem trước)
+      document.querySelectorAll('.mode-btn').forEach((btn) => {
+        btn.addEventListener('click', () => setViewMode(btn.dataset.mode));
+      });
+
+      // Các nút hành động trên thanh công cụ
+      document.getElementById('btnPinNote').addEventListener('click', togglePinActiveNote);
+      document.getElementById('btnExportMd').addEventListener('click', exportActiveNoteAsMarkdown);
+      document.getElementById('btnExportPdf').addEventListener('click', async () => {
+        const active = getActiveNote();
+        if (active) {
+          await renderPreviewAndBacklinks(active);
+        }
+        window.print();
+      });
+      document.getElementById('btnDeleteNote').addEventListener('click', openDeleteConfirmModal);
+      document.getElementById('btnConfirmDeleteNote').addEventListener('click', confirmDeleteActiveNote);
+
+      // Xử lý bấm vào WikiLink [[Tên ghi chú]] và Backlinks
+      document.getElementById('previewPane').addEventListener('click', async (e) => {
+        const wikiLink = e.target.closest('[data-wikilink]');
+        if (wikiLink) {
+          e.preventDefault();
+          const targetTitle = wikiLink.dataset.wikilink;
+          const existing = state.notes.find(
+            (n) => n.title.trim().toLowerCase() === targetTitle.toLowerCase()
+          );
+          if (existing) {
+            state.activeNoteId = existing.id;
+            renderNoteList();
+            await renderActiveWorkspace();
+          } else {
+            await createNewNote(targetTitle, `# ${targetTitle}\n\nĐược liên kết từ [[${getActiveNote()?.title || ''}]]\n`);
+          }
+          return;
+        }
+
+        const backlinkCard = e.target.closest('[data-open-note-id]');
+        if (backlinkCard) {
+          state.activeNoteId = backlinkCard.dataset.openNoteId;
+          renderNoteList();
+          await renderActiveWorkspace();
+        }
+      });
+
+      // Lịch sử phiên bản
+      document.getElementById('btnVersionHistory').addEventListener('click', openVersionHistoryModal);
+      document.getElementById('btnCreateSnapshotNow').addEventListener('click', async () => {
+        const note = getActiveNote();
+        if (!note) return;
+        await persistNoteAndCheckVersion(note, true);
+        await openVersionHistoryModal();
+        showToast('Đã tạo mốc phiên bản mới', 'success');
+      });
+      document.getElementById('versionListContainer').addEventListener('click', (e) => {
+        const item = e.target.closest('[data-version-id]');
+        if (!item) return;
+        selectVersionInModal(item.dataset.versionId);
+      });
+      document.getElementById('btnRestoreVersion').addEventListener('click', restoreSelectedVersion);
+
+      // Ôn tập Flashcard
+      document.getElementById('btnOpenFlashcards').addEventListener('click', openFlashcardModal);
+      document.getElementById('fcTagFilter').addEventListener('change', (e) => {
+        startFlashcardSession(e.target.value);
+      });
+      const flipCard = () => {
+        state.fcFlipped = !state.fcFlipped;
+        renderCurrentFlashcard();
+      };
+      document.getElementById('fcCardBox').addEventListener('click', flipCard);
+      document.getElementById('btnFcFlip').addEventListener('click', flipCard);
+      document.getElementById('btnFcRemembered').addEventListener('click', () => {
+        const current = state.fcQueue[state.fcCurrentIndex];
+        if (current) state.fcRememberedIds.add(current.id);
+        state.fcCurrentIndex++;
+        state.fcFlipped = false;
+        renderCurrentFlashcard();
+      });
+      document.getElementById('btnFcForgot').addEventListener('click', () => {
+        const current = state.fcQueue[state.fcCurrentIndex];
+        if (current) state.fcForgotIds.add(current.id);
+        state.fcCurrentIndex++;
+        state.fcFlipped = false;
+        renderCurrentFlashcard();
+      });
+      document.getElementById('btnFcRetryMissed').addEventListener('click', () => {
+        const missedCards = state.flashcards.filter((c) => state.fcForgotIds.has(c.id));
+        startFlashcardSession(document.getElementById('fcTagFilter').value, missedCards);
+      });
+      document.getElementById('btnFcRestartAll').addEventListener('click', () => {
+        startFlashcardSession(document.getElementById('fcTagFilter').value);
+      });
+
+      // Sao lưu & Khôi phục JSON
+      document.getElementById('btnExportBackup').addEventListener('click', exportFullBackupJson);
+      document.getElementById('btnBannerBackupNow').addEventListener('click', exportFullBackupJson);
+      document.getElementById('btnBannerRemindLater').addEventListener('click', async () => {
+        await idbPut('meta', { key: 'remindBackupAfter', value: Date.now() + 24 * 60 * 60 * 1000 });
+        document.getElementById('backupBanner').classList.remove('show');
+        showToast('Sẽ nhắc lại sau 24 giờ');
+      });
+
+      const fileImportInput = document.getElementById('fileImportInput');
+      document.getElementById('btnImportBackup').addEventListener('click', () => fileImportInput.click());
+      fileImportInput.addEventListener('change', (e) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+          try {
+            const parsed = JSON.parse(ev.target.result);
+            if (!Array.isArray(parsed.notes)) {
+              throw new Error('Cấu trúc file .json không hợp lệ');
+            }
+            normalizeFolders(parsed.folders);
+            state.pendingImportData = parsed;
+            document.getElementById('importBackupSummary').textContent =
+              `Tìm thấy ${parsed.notes.length} ghi chú, ${(parsed.folders || []).length} thư mục, ${(parsed.images || []).length} hình ảnh và ${(parsed.versions || []).length} bản lịch sử trong file sao lưu.`;
+            document.getElementById('modalImportBackup').classList.add('open');
+          } catch (err) {
+            showToast('File sao lưu không hợp lệ: ' + err.message, 'error');
+          }
+          fileImportInput.value = '';
+        };
+        reader.readAsText(file);
+      });
+      document.getElementById('btnImportMerge').addEventListener('click', () => applyImportedBackup('merge'));
+      document.getElementById('btnImportOverwrite').addEventListener('click', () => applyImportedBackup('overwrite'));
+
+      // Đóng các Modal
+      document.querySelectorAll('[data-close-modal]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          document.getElementById(btn.dataset.closeModal).classList.remove('open');
+        });
+      });
+
+      // Phím tắt toàn cục: Ctrl+N, Ctrl+K, Ctrl+E, Ctrl+B (Ẩn/Hiện Tab)
+      window.addEventListener('keydown', (e) => {
+        const isMod = e.ctrlKey || e.metaKey;
+        if (isMod && e.key.toLowerCase() === 'k') {
+          e.preventDefault();
+          if (state.sidebarCollapsed) {
+            state.sidebarCollapsed = false;
+            applyPanelVisibility();
+          }
+          searchInput.focus();
+          searchInput.select();
+        } else if (isMod && e.key.toLowerCase() === 'e') {
+          e.preventDefault();
+          cycleViewMode();
+        } else if (isMod && e.key.toLowerCase() === 'n') {
+          e.preventDefault();
+          createNewNote();
+        } else if (isMod && (e.key.toLowerCase() === 'b' || e.key === '\\')) {
+          e.preventDefault();
+          toggleSidebarPanel();
+        }
+      });
+
+      // Sự kiện mở hộp thoại Tùy chỉnh chữ (Aa)
+      document.getElementById('btnOpenFontSettingsSidebar').addEventListener('click', openFontSettingsModal);
+      document.getElementById('btnOpenFontSettingsToolbar').addEventListener('click', openFontSettingsModal);
+
+      // Lắng nghe thay đổi trực tiếp trong hộp thoại Tùy chỉnh chữ
+      ['ui', 'editor', 'preview', 'code'].forEach((group) => {
+        document.getElementById(`fontPreset_${group}`).addEventListener('change', readFontSettingsFromModalAndApply);
+        document.getElementById(`fontCustom_${group}`).addEventListener('input', readFontSettingsFromModalAndApply);
+        document.getElementById(`fontSize_${group}`).addEventListener('input', readFontSettingsFromModalAndApply);
+        document.getElementById(`fontLh_${group}`).addEventListener('input', readFontSettingsFromModalAndApply);
+      });
+      document.getElementById('fontWidth_preview').addEventListener('input', readFontSettingsFromModalAndApply);
+      document.getElementById('fontFullWidth_preview').addEventListener('change', readFontSettingsFromModalAndApply);
+
+      // Đặt lại từng nhóm font hoặc khôi phục mặc định toàn bộ
+      document.querySelectorAll('[data-reset-font-group]').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          const group = btn.dataset.resetFontGroup;
+          const next = normalizeFontSettings(state.fontSettings);
+          next[group] = getDefaultFontGroup(group);
+          await saveAndApplyFontSettings(next);
+          populateFontSettingsModalInputs();
+          showToast(`Đã đặt lại nhóm chữ: ${group.toUpperCase()}`);
+        });
+      });
+
+      document.getElementById('btnResetAllFonts').addEventListener('click', async () => {
+        const defaults = getDefaultFontSettings();
+        await saveAndApplyFontSettings(defaults);
+        populateFontSettingsModalInputs();
+        showToast('Đã khôi phục toàn bộ cài đặt phông chữ về mặc định', 'success');
+      });
+
+      // Đồng bộ thanh trượt độ rộng trên toolbar với fontSettings.preview
+      const syncToolbarWidthToFontSettings = () => {
+        if (state.fontSettings && state.fontSettings.preview) {
+          state.fontSettings.preview.maxWidth = state.noteContentWidth;
+          state.fontSettings.preview.fullWidth = state.noteFullWidth;
+          saveAndApplyFontSettings(state.fontSettings);
+        }
+      };
+      document.getElementById('noteWidthSlider').addEventListener('change', syncToolbarWidthToFontSettings);
+      document.getElementById('btnToggleFullWidth').addEventListener('click', syncToolbarWidthToFontSettings);
+
+      // Sự kiện nút "Chèn sơ đồ mạch" và "Chèn waveform" trên thanh công cụ
+      document.getElementById('btnInsertCircuit').addEventListener('click', () => insertSpecialBlockAtCursor('circuit'));
+      document.getElementById('btnInsertWave').addEventListener('click', () => insertSpecialBlockAtCursor('wave'));
+
+      // Sự kiện nút "Chỉnh sửa", "Xuất SVG", "Xuất PNG" trên từng khối đặc biệt trong phần Xem trước
+      document.getElementById('previewPane').addEventListener('click', (e) => {
+        const actionBtn = e.target.closest('[data-block-action]');
+        if (!actionBtn) return;
+        e.preventDefault();
+        const action = actionBtn.dataset.blockAction;
+        const blockType = actionBtn.dataset.blockType;
+        const blockId = actionBtn.dataset.blockId;
+        const cardEl = actionBtn.closest('.special-block-card');
+        const blockIndex = parseBlockIndexFromId(blockType, blockId, cardEl);
+
+        if (action === 'edit') {
+          openBlockEditorModal(blockType, blockIndex);
+        } else if (action === 'export-svg') {
+          exportBlockSvgElement(cardEl, blockType, blockIndex, 'svg');
+        } else if (action === 'export-png') {
+          exportBlockSvgElement(cardEl, blockType, blockIndex, 'png', 'white');
+        }
+      });
+
+      // Sự kiện Lưu / Hủy trong Modal chỉnh sửa khối toàn màn hình
+      document.getElementById('btnCancelBlockEditor').addEventListener('click', () => closeBlockEditorModal(false));
+      document.getElementById('btnSaveCloseBlockEditor').addEventListener('click', saveAndCloseBlockEditorModal);
+
+      // Cảnh báo nếu nhấn phím Escape khi đang mở Modal chỉnh sửa khối có thay đổi chưa lưu
+      window.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && state.blockEditor.isOpen) {
+          e.preventDefault();
+          closeBlockEditorModal(false);
+        }
+      });
+    }
+
+    /* =========================================================================
+       === SECTION: HỘP THOẠI LỊCH SỬ PHIÊN BẢN ===
+       ========================================================================= */
+    async function openVersionHistoryModal() {
+      const note = getActiveNote();
+      if (!note) return;
+
+      state.activeVersions = await getVersionsForNote(note.id);
+      const emptyEl = document.getElementById('versionEmptyState');
+      const layoutEl = document.getElementById('versionLayout');
+      const restoreBtn = document.getElementById('btnRestoreVersion');
+
+      if (state.activeVersions.length === 0) {
+        emptyEl.style.display = 'flex';
+        layoutEl.style.display = 'none';
+        restoreBtn.disabled = true;
+      } else {
+        emptyEl.style.display = 'none';
+        layoutEl.style.display = 'grid';
+        restoreBtn.disabled = false;
+        selectVersionInModal(state.activeVersions[0].id);
+      }
+
+      document.getElementById('modalVersions').classList.add('open');
+    }
+
+    function selectVersionInModal(versionId) {
+      state.selectedVersionId = versionId;
+      const listEl = document.getElementById('versionListContainer');
+      listEl.innerHTML = state.activeVersions
+        .map((v, index) => {
+          const isActive = v.id === versionId;
+          return `
+            <div class="version-item ${isActive ? 'active' : ''}" data-version-id="${v.id}">
+              <div style="font-weight:700;">Bản #${state.activeVersions.length - index}</div>
+              <div style="font-size:12px; color:var(--text-muted);">${formatDateTime(v.savedAt)}</div>
+            </div>
+          `;
+        })
+        .join('');
+
+      const selected = state.activeVersions.find((v) => v.id === versionId);
+      document.getElementById('versionPreviewBox').textContent = selected
+        ? `Tiêu đề: ${selected.title}\n----------------------------------------\n${selected.content}`
+        : '';
+    }
+
+    async function restoreSelectedVersion() {
+      const note = getActiveNote();
+      const selected = state.activeVersions.find((v) => v.id === state.selectedVersionId);
+      if (!note || !selected) return;
+
+      note.title = selected.title;
+      note.content = selected.content;
+      note.updatedAt = Date.now();
+
+      await idbPut('notes', note);
+      document.getElementById('modalVersions').classList.remove('open');
+      renderNoteList();
+      await renderActiveWorkspace();
+      showToast('Đã khôi phục phiên bản thành công!', 'success');
+    }
+
+    /* =========================================================================
+       === SECTION: KHỞI ĐỘNG ỨNG DỤNG ===
+       ========================================================================= */
+    async function initApp() {
+      initTheme();
+      initLayoutPreferences();
+      initDraggableResizers();
+      bindAllEvents();
+      bindFolderEvents();
+      bindRefinedUiEvents();
+
+      try {
+        state.db = await openDatabase();
+        const foldersMeta = await idbGet('meta', 'folders');
+        state.folders = normalizeFolders(foldersMeta?.value);
+        await loadFontSettingsFromIdb();
+        await seedInitialNotesIfEmpty();
+        await migrateLegacySampleNotes();
+        state.notes = await idbGetAll('notes');
+        if (state.filterType === 'folder' && state.filterFolderId && !state.folders.some(f => f.id === state.filterFolderId)) { state.filterType = 'all'; state.filterFolderId = null; }
+        const sorted = getFilteredNotes();
+        state.activeNoteId = sorted[0]?.id || null;
+
+        renderSidebar();
+        renderNoteList();
+        await renderActiveWorkspace();
+        await checkAndRenderBackupStatus();
+      } catch (err) {
+        console.error('Lỗi khởi tạo ứng dụng:', err);
+        showToast('Không thể mở cơ sở dữ liệu IndexedDB: ' + err.message, 'error');
+      }
+    }
+
+    window.addEventListener('DOMContentLoaded', initApp);
