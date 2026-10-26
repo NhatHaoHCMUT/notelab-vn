@@ -179,7 +179,7 @@
     }
 
     :root {
-      --font-ui: "Times New Roman", Times, Georgia, serif;
+      --font-ui: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
       --size-ui: 15px;
       --lh-ui: 1.55;
 
@@ -1865,6 +1865,147 @@
       }
     }
 
+    /* SECTION: GIAO DIỆN MỚI & THƯ MỤC - không thay renderer nội dung */
+    :root[data-theme="light"] {
+      --bg-app:#f4f5f2; --bg-sidebar:#f3f4f0; --bg-list:#fafbf8; --bg-editor:#fff;
+      --bg-elevated:#fff; --bg-hover:#e9eeea; --bg-active:#e2eeea;
+      --accent:#246b5d; --accent-hover:#195448; --accent-soft:#246b5d12;
+      --text-primary:#25342e; --text-secondary:#58665f; --text-muted:#738178;
+      --border-color:#e2e7e1; --border-strong:#cbd5cd; --bg-tag:#ecf1ed;
+      --bg-tag-active:#246b5d; --success:#28745e;
+    }
+    :root[data-theme="dark"] {
+      --bg-app:#131b1a; --bg-sidebar:#17211f; --bg-list:#192421; --bg-editor:#1c2825;
+      --bg-elevated:#24332e; --bg-hover:#2a3a33; --bg-active:#294238;
+      --accent:#99c9b2; --accent-hover:#badbc8; --accent-soft:#99c9b214;
+      --text-primary:#e4ece6; --text-secondary:#adbbb1; --text-muted:#8a9e92;
+      --border-color:#2d3d35; --border-strong:#41564a; --bg-tag:#2c3e34;
+      --bg-tag-active:#326d56; --text-on-accent:#12251b;
+    }
+    :root { --sidebar-width:244px; --notelist-width:290px; }
+    button, a, summary, select { -webkit-tap-highlight-color:transparent; }
+    button, .note-card, summary { transition:background .16s, border-color .16s, color .16s; }
+    :focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
+    .sidebar-header { padding:24px 16px 18px; flex-wrap:wrap; gap:16px; border-bottom:0; }
+    .brand { font-size:17px; font-weight:700; gap:10px; letter-spacing:-.5px; }
+    .brand small { display:block; color:var(--text-muted); font-size:8px; letter-spacing:1.5px; margin-top:3px; }
+    .brand-mark { width:34px; height:37px; display:grid; place-content:center; border:1px solid var(--border-strong); border-radius:10px; font-family:Georgia,serif; font-size:26px; position:relative; background:var(--bg-elevated); }
+    .brand-mark span { position:absolute; bottom:1px; right:4px; color:var(--accent); }
+    .sidebar-header-actions { width:100%; gap:6px; }
+    .sidebar-header-actions .btn { flex:1; background:transparent; }
+    .search-box { margin:0 14px 16px; padding:0; }
+    .search-input { border-radius:9px; min-height:38px; background:var(--bg-elevated); padding-left:12px; border-color:var(--border-color); }
+    .flashcard-launch-btn { margin:0 14px 22px; border-radius:10px; border-color:var(--border-strong); padding:12px; background:var(--bg-elevated); color:var(--text-primary); box-shadow:none; }
+    #flashcardTotalBadge { color:var(--accent); background:var(--accent-soft); }
+    .sidebar-nav { padding:0 10px 16px; }
+    .nav-section-title { font-size:10px; letter-spacing:1.1px; color:var(--text-muted); padding:0 10px; margin:20px 0 9px; }
+    .nav-item { border-radius:8px; min-height:37px; margin:3px 0; padding:8px 11px; font-size:13px; }
+    .nav-item.active { color:var(--accent); background:var(--bg-active); font-weight:600; }
+    .nav-item-left { min-width:0; display:flex; align-items:center; gap:9px; }
+    .nav-count { background:transparent; color:var(--text-muted); font-size:11px; }
+    .nav-item.active .nav-count { color:var(--accent); background:transparent; }
+    .folder-section-heading { display:flex; align-items:center; justify-content:space-between; }
+    .folder-add, .folder-edit { border:0; background:transparent; color:var(--text-secondary); cursor:pointer; border-radius:5px; }
+    .folder-add { font-size:21px; line-height:1; width:25px; height:25px; }
+    .folder-add:hover, .folder-edit:hover { background:var(--bg-hover); color:var(--accent); }
+    .folder-row { display:flex; align-items:center; gap:2px; }
+    .folder-row .nav-item { flex:1; min-width:0; }
+    .folder-edit { width:25px; height:28px; font-size:17px; flex-shrink:0; }
+    .folder-symbol { width:14px; height:11px; border:1.4px solid currentColor; border-radius:2px; display:inline-block; position:relative; flex-shrink:0; opacity:.75; }
+    .folder-symbol:before { content:''; position:absolute; width:6px; height:3px; border:1.4px solid currentColor; border-bottom:0; border-radius:2px 2px 0 0; left:-1.4px; top:-4px; }
+    .folder-name { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .folder-drop-target { outline:2px dashed var(--accent); background:var(--accent-soft)!important; }
+    .folder-manage-link { background:none; border:0; font:inherit; font-size:11px; color:var(--accent); padding-top:5px; cursor:pointer; }
+    .sidebar-footer { padding:16px 14px; background:transparent; }
+    .backup-meta { font-size:10px; margin-top:10px; }
+    .note-list-pane { border-right:0; }
+    .list-header { padding:24px 16px 18px; align-items:flex-start; gap:8px; }
+    .list-header-title { font-size:16px; letter-spacing:-.3px; }
+    .list-header-sub { font-size:11px; margin-top:5px; }
+    .note-list-container { padding:8px 10px; }
+    .note-card { border:1px solid transparent; border-radius:12px; margin-bottom:8px; padding:16px 13px; background:transparent; cursor:pointer; }
+    .note-card.active { border-color:var(--border-strong); background:var(--bg-editor); box-shadow:0 2px 5px #00000004; }
+    .note-card.active:before { display:none; }
+    .note-card-title { font-size:14px; line-height:1.55; font-weight:650; }
+    .note-card-excerpt { font-size:12px; line-height:1.7; margin:8px 0 13px; color:var(--text-muted); -webkit-line-clamp:2; }
+    .note-card-meta { flex-wrap:wrap; gap:8px; }
+    .note-card-date { font-size:10px; color:var(--text-muted); }
+    .mini-tag { font-size:10px; padding:2px 5px; border-radius:4px; }
+    .note-card-pin { font-size:10px; color:var(--accent); background:var(--accent-soft); padding:2px 5px; border-radius:4px; }
+    .workspace-pane { background:var(--bg-editor); min-width:0; }
+    .workspace-heading { padding:26px 30px 16px; }
+    .workspace-eyebrow { font-size:9px; letter-spacing:1.5px; color:var(--text-muted); margin-bottom:10px; display:flex; align-items:center; flex-wrap:wrap; gap:10px; }
+    #activeFolderBreadcrumb { letter-spacing:0; font-size:11px; color:var(--text-secondary); }
+    .title-input { width:100%; min-width:0; font-size:26px; line-height:1.4; letter-spacing:-.7px; padding:3px 0; }
+    .workspace-toolbar { padding:10px 24px; gap:8px; position:relative; overflow:visible; background:var(--bg-editor); }
+    .toolbar-left-group { flex:0 0 auto; min-width:0; }
+    .toolbar-actions { flex:1; gap:7px; justify-content:flex-end; flex-wrap:wrap; }
+    .btn { border-radius:7px; padding:7px 11px; font-size:13px; box-shadow:none; }
+    .btn-sm { font-size:11px; padding:6px 9px; }
+    .btn-primary { font-weight:600; }
+    .btn-danger { background:transparent; }
+    .mode-switcher { border-radius:8px; border-color:transparent; padding:3px; }
+    .mode-btn { font-size:11px; padding:6px 9px; border-radius:6px; }
+    .mode-btn.active { color:var(--accent); font-weight:600; }
+    .save-status { font-size:10px; background:none!important; padding:3px; white-space:nowrap; }
+    .save-status:before { content:''; width:5px; height:5px; border-radius:50%; background:currentColor; margin-right:6px; }
+    .workspace-options { position:relative; }
+    .workspace-options summary { list-style:none; display:flex; gap:7px; cursor:pointer; }
+    .workspace-options summary::-webkit-details-marker { display:none; }
+    .workspace-menu { position:absolute; z-index:40; right:0; top:calc(100% + 8px); width:290px; border:1px solid var(--border-strong); border-radius:12px; background:var(--bg-elevated); padding:12px; box-shadow:0 12px 35px #00000018; display:flex; flex-wrap:wrap; gap:8px; }
+    .workspace-menu .width-control-group { width:100%; padding:8px; flex-wrap:wrap; }
+    .note-tags-bar { padding:10px 30px 13px; background:transparent; gap:9px; }
+    .tag-chip { border-radius:5px; font-size:11px; padding:3px 7px; }
+    .tag-add-input { font-size:11px; min-width:120px; }
+    .note-folder-control { display:flex; gap:7px; align-items:center; font-size:10px; color:var(--text-muted); padding-right:10px; border-right:1px solid var(--border-color); }
+    .note-folder-control select { max-width:180px; background:var(--bg-editor); color:var(--text-secondary); border:0; border-radius:4px; font-size:11px; padding:4px 2px; }
+    .markdown-textarea { padding:24px 28px; }
+    .preview-pane { padding:24px 30px; }
+    .editor-helper-bar { font-size:10px; padding:8px 14px; gap:8px; flex-wrap:wrap; background:var(--bg-app); }
+    .markdown-body h1 { letter-spacing:-.5px; }
+    .special-block-card { border-radius:10px; }
+    .special-block-toolbar { padding:9px 12px; }
+    .modal-box { border-radius:15px; border-color:var(--border-strong); }
+    .modal-header { padding:18px 22px; }
+    .folder-modal { max-width:440px; }
+    .folder-modal .modal-body { padding:22px; }
+    .folder-modal label { display:block; font-size:12px; margin-bottom:9px; color:var(--text-secondary); }
+    .folder-modal input { width:100%; padding:11px; border-radius:8px; }
+    .folder-help { font-size:12px; color:var(--text-muted); margin-top:12px; }
+    .folder-error { color:var(--danger); font-size:12px; margin-top:10px; }
+    .folder-delete-warning { font-size:12px; padding:12px; border:1px solid var(--danger); border-radius:8px; margin-top:12px; }
+    .folder-delete-warning button { margin-top:10px; }
+    [hidden] { display:none!important; }
+    @media screen and (max-width:1180px) {
+      .workspace-toolbar { padding:9px 16px; }
+      .toolbar-actions { gap:5px; }
+      .workspace-heading { padding:22px 22px 12px; }
+      .save-status { order:2; }
+      .note-tags-bar { padding-left:22px; padding-right:22px; }
+    }
+    @media screen and (max-width:760px) {
+      :root { --sidebar-width:195px; --notelist-width:220px; }
+      .sidebar { min-width:170px; position:absolute; left:0; top:0; bottom:0; width:min(280px,85vw); z-index:60; box-shadow:12px 0 40px #00000022; }
+      .note-list-pane { position:absolute; left:0; top:0; bottom:0; width:min(310px,90vw); z-index:55; box-shadow:12px 0 40px #00000022; }
+      #resizerSidebar, #resizerNoteList { display:none; }
+      .app-layout { position:relative; }
+      .workspace-heading { padding:18px 16px 10px; }
+      .title-input { font-size:22px; }
+      .workspace-toolbar { padding:8px 12px; }
+      .toolbar-left-group, .toolbar-actions { flex-wrap:wrap; }
+      .toolbar-actions { justify-content:flex-start; }
+      .workspace-pane { min-width:0; }
+      .note-tags-bar { padding:8px 16px; }
+      .editor-body.mode-split { flex-direction:column; overflow:auto; }
+      .editor-body.mode-split .editor-pane { width:100%!important; flex:1 0 45%; min-height:200px; border-bottom:1px solid var(--border-color); }
+      .editor-body.mode-split .preview-pane { flex:1 0 55%; min-height:220px; min-width:0; }
+      .editor-body.mode-split #resizerSplit { display:none; }
+      .markdown-textarea { padding:18px 16px; }
+      .preview-pane { padding:18px 16px; }
+      .workspace-menu { position:fixed; right:12px; left:auto; top:150px; max-width:calc(100vw - 24px); }
+    }
+    @media (prefers-reduced-motion:reduce) { button, .note-card, summary { transition:none; } }
+
     /* =====================================================================
        SECTION 8: CSS IN ẤN / XUẤT PDF (@media print)
        ===================================================================== */
@@ -1876,6 +2017,8 @@
         color: #000000 !important;
         display: block !important;
       }
+      .note-folder-control,
+      .workspace-eyebrow,
       .backup-banner,
       .sidebar,
       .note-list-pane,
@@ -1912,6 +2055,7 @@
         padding: 0 0 8px 0 !important;
         margin-bottom: 10px !important;
       }
+      .workspace-heading { padding: 0 !important; }
       .title-input {
         font-size: 24pt !important;
         color: #000 !important;
@@ -1948,6 +2092,26 @@
   </style>
 </head>
 <body>
+  <div id="modalFolder" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="folderModalTitle">
+    <form id="folderForm" class="modal-box folder-modal">
+      <div class="modal-header"><h3 id="folderModalTitle">Tạo thư mục</h3><button type="button" class="btn btn-sm" data-close-modal="modalFolder" aria-label="Đóng">×</button></div>
+      <div class="modal-body">
+        <label for="folderNameInput">Tên thư mục</label>
+        <input id="folderNameInput" class="font-input" maxlength="80" required placeholder="Ví dụ: Điện tử cơ bản" autocomplete="off" />
+        <p class="folder-help">Gom các ghi chú theo môn học, dự án hoặc chủ đề.</p>
+        <p id="folderError" role="alert" class="folder-error"></p>
+        <div id="folderDeleteWarning" class="folder-delete-warning" hidden>
+          Xóa thư mục này? Tất cả ghi chú bên trong sẽ được giữ ở <strong>Chưa phân loại</strong>.
+          <button id="btnConfirmDeleteFolder" type="button" class="btn btn-danger">Xác nhận xóa thư mục</button>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="btnDeleteFolder" type="button" class="btn btn-danger">Xóa thư mục</button>
+        <button type="button" class="btn" data-close-modal="modalFolder">Hủy</button>
+        <button id="btnSaveFolder" type="submit" class="btn btn-primary">Tạo thư mục</button>
+      </div>
+    </form>
+  </div>
   <div class="app-wrapper">
     <!-- Thanh nhắc sao lưu (> 7 ngày) -->
     <div id="backupBanner" class="backup-banner">
@@ -1966,7 +2130,8 @@
       <aside id="sidebarPane" class="sidebar">
         <div class="sidebar-header">
           <div class="brand">
-            <span>NoteLab VN</span>
+            <span class="brand-mark" aria-hidden="true">N<span>.</span></span>
+            <span>NoteLab VN<small>KHÔNG GIAN HỌC TẬP</small></span>
           </div>
           <div class="sidebar-header-actions">
             <button id="btnOpenFontSettingsSidebar" class="btn btn-sm" title="Tùy chỉnh phông chữ (Aa)">Aa</button>
@@ -1976,7 +2141,7 @@
         </div>
 
         <div class="search-box">
-          <input id="searchInput" type="text" class="search-input" placeholder="Tìm kiếm (Ctrl+K)..." />
+          <input id="searchInput" aria-label="Tìm kiếm ghi chú" type="text" class="search-input" placeholder="Tìm kiếm (Ctrl+K)..." />
           <button id="btnClearSearch" class="search-clear" title="Xóa tìm kiếm">×</button>
         </div>
 
@@ -1996,6 +2161,15 @@
             <span id="countPinnedNotes" class="nav-count">0</span>
           </button>
 
+          <div class="nav-section-title folder-section-heading">
+            <span>Thư mục</span>
+            <button id="btnNewFolder" class="folder-add" title="Tạo thư mục mới" aria-label="Tạo thư mục mới">+</button>
+          </div>
+          <button id="navUnfiledNotes" class="nav-item" data-folder-id="">
+            <span class="nav-item-left"><span class="folder-symbol" aria-hidden="true"></span>Chưa phân loại</span>
+            <span id="countUnfiledNotes" class="nav-count">0</span>
+          </button>
+          <div id="sidebarFolderList"></div>
           <div class="nav-section-title">
             <span>Danh sách Tag</span>
           </div>
@@ -2021,6 +2195,7 @@
           <div style="min-width:0;">
             <div id="currentFilterTitle" class="list-header-title">Tất cả ghi chú</div>
             <div id="currentFilterSub" class="list-header-sub">0 ghi chú</div>
+            <button id="btnManageCurrentFolder" class="folder-manage-link" hidden>Quản lý thư mục</button>
           </div>
           <div style="display:flex; gap:4px; flex-shrink:0;">
             <button id="btnNewNote" class="btn btn-primary btn-sm" title="Tạo ghi chú mới (Ctrl+N)">+ Tạo mới</button>
@@ -2045,19 +2220,33 @@
         </div>
 
         <div id="workspaceActive" style="display:flex; flex-direction:column; flex:1; min-height:0;">
+          <div class="workspace-heading">
+            <div class="workspace-eyebrow">KHÔNG GIAN CỦA BẠN <span>/</span> <span id="activeFolderBreadcrumb">Chưa phân loại</span></div>
+            <input id="noteTitleInput" aria-label="Tiêu đề ghi chú" type="text" class="title-input" placeholder="Tiêu đề ghi chú..." />
+          </div>
           <!-- Thanh công cụ trên -->
           <div class="workspace-toolbar">
             <div class="toolbar-left-group">
               <button id="btnToggleSidebarTop" class="btn btn-sm" title="Ẩn / Hiện thanh Tab bên trái (Ctrl+B)">Tab</button>
               <button id="btnToggleNoteListTop" class="btn btn-sm" title="Ẩn / Hiện cột Danh sách ghi chú">Danh sách</button>
-              <input id="noteTitleInput" type="text" class="title-input" placeholder="Tiêu đề ghi chú..." />
+
             </div>
 
                 <div class="toolbar-actions">
               <!-- Chèn nhanh khối Sơ đồ mạch & Waveform tại con trỏ -->
               <button id="btnInsertCircuit" class="btn btn-sm" title="Chèn khối sơ đồ mạch tại vị trí con trỏ và mở trình vẽ">+ Chèn sơ đồ mạch</button>
               <button id="btnInsertWave" class="btn btn-sm" title="Chèn khối giản đồ xung (Waveform) tại vị trí con trỏ và mở trình soạn">+ Chèn waveform</button>
-              <button id="btnOpenFontSettingsToolbar" class="btn btn-sm" title="Tùy chỉnh chữ toàn ứng dụng">Aa Chữ</button>
+              <span id="saveStatusBadge" class="save-status saved">Đã lưu</span>
+
+              <div class="mode-switcher" title="Đổi chế độ (Ctrl+E)">
+                <button class="mode-btn" data-mode="edit">Soạn</button>
+                <button class="mode-btn active" data-mode="split">Chia đôi</button>
+                <button class="mode-btn" data-mode="preview">Xem trước</button>
+              </div>
+
+              <details class="workspace-options" id="workspaceOptions">
+                <summary class="btn btn-sm">Công cụ <span aria-hidden="true">⌄</span></summary>
+                <div class="workspace-menu">              <button id="btnOpenFontSettingsToolbar" class="btn btn-sm" title="Tùy chỉnh chữ toàn ứng dụng">Aa Chữ</button>
 
               <!-- Tùy chỉnh độ rộng phần Take Note -->
               <div class="width-control-group" title="Tùy chỉnh độ rộng vùng soạn thảo và đọc bài">
@@ -2067,24 +2256,21 @@
                 <button id="btnToggleFullWidth" class="btn btn-sm" style="padding:2px 6px; font-size:12px;" title="Mở rộng 100% toàn khung">Toàn khung</button>
               </div>
 
-              <span id="saveStatusBadge" class="save-status saved">Đã lưu</span>
-
-              <div class="mode-switcher" title="Đổi chế độ (Ctrl+E)">
-                <button class="mode-btn" data-mode="edit">Soạn</button>
-                <button class="mode-btn active" data-mode="split">Chia đôi</button>
-                <button class="mode-btn" data-mode="preview">Xem trước</button>
-              </div>
-
               <button id="btnPinNote" class="btn btn-sm" title="Ghim / Bỏ ghim ghi chú">Ghim</button>
               <button id="btnVersionHistory" class="btn btn-sm" title="Xem và khôi phục lịch sử phiên bản">Lịch sử (<span id="versionCountBadge">0</span>)</button>
               <button id="btnExportMd" class="btn btn-sm" title="Xuất ghi chú hiện tại ra file .md">Xuất .MD</button>
               <button id="btnExportPdf" class="btn btn-sm" title="In hoặc lưu thành PDF">In PDF</button>
               <button id="btnDeleteNote" class="btn btn-danger btn-sm" title="Xóa ghi chú này">Xóa</button>
+                </div>
+              </details>
             </div>
           </div>
 
           <!-- Thanh quản lý Tag của ghi chú -->
           <div class="note-tags-bar">
+            <label class="note-folder-control" for="noteFolderSelect"><span>Thư mục</span>
+              <select id="noteFolderSelect" aria-label="Chuyển ghi chú vào thư mục"></select>
+            </label>
             <span style="font-size:13px; color:var(--text-muted); font-weight:700;">Tags:</span>
             <div id="activeNoteTags" style="display:flex; flex-wrap:wrap; gap:6px;"></div>
             <input id="tagAddInput" type="text" class="tag-add-input" placeholder="+ Thêm tag (Enter)..." />
@@ -2095,7 +2281,7 @@
             <!-- Khung soạn thảo Markdown -->
             <div id="editorDropZone" class="editor-pane">
               <div class="editor-scroll-Area">
-                <textarea id="markdownInput" class="markdown-textarea" placeholder="Nhập nội dung Markdown, công thức LaTeX ($...$, $$...$$), liên kết [[Tên ghi chú]], thẻ Q:: / A:: hoặc dán ảnh (Ctrl+V)..."></textarea>
+                <textarea id="markdownInput" aria-label="Nội dung Markdown" class="markdown-textarea" placeholder="Nhập nội dung Markdown, công thức LaTeX ($...$, $$...$$), liên kết [[Tên ghi chú]], thẻ Q:: / A:: hoặc dán ảnh (Ctrl+V)..."></textarea>
               </div>
               <div class="editor-helper-bar">
                 <span>Dán ảnh <strong>Ctrl+V</strong> hoặc kéo-thả ảnh | Liên kết <code>[[Tên bài]]</code> | Thẻ <code>Q::</code> / <code>A::</code></span>
@@ -5329,6 +5515,10 @@
       activeNoteId: null,
       filterType: 'all',
       filterTag: null,
+      folders: [],
+      filterFolderId: null,
+      editingFolderId: null,
+      folderBusy: false,
       searchQuery: '',
       viewMode: 'split',
       sidebarCollapsed: false,
@@ -5411,6 +5601,7 @@
     function initLayoutPreferences() {
       state.sidebarCollapsed = localStorage.getItem('notelab_sidebar_collapsed') === '1';
       state.noteListCollapsed = localStorage.getItem('notelab_notelist_collapsed') === '1';
+      if (window.innerWidth <= 760) { state.sidebarCollapsed = true; state.noteListCollapsed = true; }
       state.noteFullWidth = localStorage.getItem('notelab_note_fullwidth') === '1';
 
       const savedWidth = parseInt(localStorage.getItem('notelab_note_width') || '860', 10);
@@ -5456,11 +5647,13 @@
 
     function toggleSidebarPanel() {
       state.sidebarCollapsed = !state.sidebarCollapsed;
+      if (window.innerWidth <= 760 && !state.sidebarCollapsed) state.noteListCollapsed = true;
       applyPanelVisibility();
     }
 
     function toggleNoteListPanel() {
       state.noteListCollapsed = !state.noteListCollapsed;
+      if (window.innerWidth <= 760 && !state.noteListCollapsed) state.sidebarCollapsed = true;
       applyPanelVisibility();
     }
 
@@ -6131,6 +6324,180 @@ A:: $f_c = \\frac{1}{2\\pi R C}$ (tại đó biên độ suy giảm $-3\\text{ d
     /* =========================================================================
        === SECTION: QUẢN LÝ GHI CHÚ, TAG, TÌM KIẾM & BACKLINKS ===
        ========================================================================= */
+    // Thư mục phẳng; dữ liệu nằm trong meta để không đổi phiên bản IndexedDB.
+    function normalizeFolders(raw) {
+      if (raw == null) return [];
+      if (!Array.isArray(raw)) throw new Error('Danh sách thư mục không hợp lệ.');
+      const ids = new Set();
+      return raw.map(f => {
+        if (!f || typeof f.id !== 'string' || !f.id || f.id.length > 200 || typeof f.name !== 'string' || !f.name.trim() || f.name.trim().length > 80 || ids.has(f.id)) {
+          throw new Error('Dữ liệu thư mục có tên hoặc mã không hợp lệ.');
+        }
+        ids.add(f.id);
+        return { id: f.id, name: f.name.trim(), createdAt: Number(f.createdAt) || Date.now() };
+      });
+    }
+
+    function getNoteFolderId(note) {
+      return state.folders.some(f => f.id === note.folderId) ? note.folderId : null;
+    }
+
+    function folderName(id) {
+      return state.folders.find(f => f.id === id)?.name || 'Chưa phân loại';
+    }
+
+    function commitFolderChanges(folders, changedNotes = []) {
+      return new Promise((resolve, reject) => {
+        const tx = state.db.transaction(['notes', 'meta'], 'readwrite');
+        tx.objectStore('meta').put({ key: 'folders', value: folders });
+        for (const note of changedNotes) tx.objectStore('notes').put(note);
+        tx.oncomplete = () => {
+          state.folders = folders;
+          for (const changed of changedNotes) {
+            const original = state.notes.find(n => n.id === changed.id);
+            if (original) Object.assign(original, changed);
+          }
+          resolve();
+        };
+        tx.onabort = () => reject(tx.error || new Error('Không thể lưu thư mục.'));
+        tx.onerror = () => reject(tx.error || new Error('Không thể lưu thư mục.'));
+      });
+    }
+
+    function renderFolders() {
+      const count = id => state.notes.filter(n => getNoteFolderId(n) === id).length;
+      document.getElementById('countUnfiledNotes').textContent = count(null);
+      document.getElementById('navUnfiledNotes').classList.toggle('active', state.filterType === 'folder' && state.filterFolderId === null);
+      document.getElementById('sidebarFolderList').innerHTML = [...state.folders]
+        .sort((a,b) => a.name.localeCompare(b.name, 'vi'))
+        .map(f => `<div class="folder-row"><button class="nav-item ${state.filterType === 'folder' && state.filterFolderId === f.id ? 'active' : ''}" data-folder-id="${escapeHtml(f.id)}" title="${escapeHtml(f.name)} · Có thể thả ghi chú vào đây"><span class="nav-item-left"><span class="folder-symbol" aria-hidden="true"></span><span class="folder-name">${escapeHtml(f.name)}</span></span><span class="nav-count">${count(f.id)}</span></button><button class="folder-edit" data-edit-folder="${escapeHtml(f.id)}" title="Quản lý thư mục ${escapeHtml(f.name)}" aria-label="Quản lý thư mục ${escapeHtml(f.name)}">···</button></div>`).join('');
+      const note = getActiveNote();
+      if (note) renderNoteFolderSelect(note);
+    }
+
+    function renderNoteFolderSelect(note) {
+      const select = document.getElementById('noteFolderSelect');
+      select.innerHTML = '<option value="">Chưa phân loại</option>' + [...state.folders].sort((a,b) => a.name.localeCompare(b.name, 'vi')).map(f => `<option value="${escapeHtml(f.id)}">${escapeHtml(f.name)}</option>`).join('');
+      select.value = getNoteFolderId(note) || '';
+      document.getElementById('activeFolderBreadcrumb').textContent = folderName(getNoteFolderId(note));
+    }
+
+    function openFolderDialog(id = null) {
+      const folder = state.folders.find(f => f.id === id);
+      state.editingFolderId = folder?.id || null;
+      document.getElementById('folderModalTitle').textContent = folder ? 'Quản lý thư mục' : 'Tạo thư mục';
+      document.getElementById('btnSaveFolder').textContent = folder ? 'Lưu thay đổi' : 'Tạo thư mục';
+      document.getElementById('folderNameInput').value = folder?.name || '';
+      document.getElementById('folderError').textContent = '';
+      document.getElementById('btnDeleteFolder').hidden = !folder;
+      document.getElementById('folderDeleteWarning').hidden = true;
+      document.getElementById('modalFolder').classList.add('open');
+      document.getElementById('folderNameInput').focus();
+    }
+
+    async function saveFolderFromDialog() {
+      if (state.folderBusy) return;
+      const name = document.getElementById('folderNameInput').value.trim();
+      const id = state.editingFolderId;
+      if (!name || name.length > 80) { document.getElementById('folderError').textContent = 'Nhập tên từ 1 đến 80 ký tự.'; return; }
+      if (state.folders.some(f => f.id !== id && f.name.toLocaleLowerCase('vi') === name.toLocaleLowerCase('vi'))) {
+        document.getElementById('folderError').textContent = 'Tên thư mục đã tồn tại.'; return;
+      }
+      state.folderBusy = true;
+      try {
+        const folderId = id || generateId('folder');
+        const folders = id ? state.folders.map(f => f.id === id ? {...f, name} : f) : [...state.folders, {id:folderId, name, createdAt:Date.now()}];
+        await commitFolderChanges(folders);
+        if (!id) { state.filterType = 'folder'; state.filterFolderId = folderId; state.filterTag = null; }
+        document.getElementById('modalFolder').classList.remove('open');
+        renderSidebar(); renderNoteList();
+        if (window.innerWidth <= 760 && !id) { state.sidebarCollapsed=true; state.noteListCollapsed=false; applyPanelVisibility(); }
+        document.getElementById('btnNewFolder').focus();
+        showToast(id ? 'Đã đổi tên thư mục.' : 'Đã tạo thư mục. Bạn có thể tạo ghi chú hoặc kéo ghi chú vào đây.', 'success');
+      } catch (err) { document.getElementById('folderError').textContent = err.message; }
+      finally { state.folderBusy = false; }
+    }
+
+    async function moveNoteToFolder(noteId, folderId) {
+      const note = state.notes.find(n => n.id === noteId);
+      if (!note || (folderId && !state.folders.some(f => f.id === folderId))) return;
+      const before = getNoteFolderId(note);
+      try {
+        // Giữ nguyên đối tượng trong bộ nhớ để bộ hẹn giờ tự lưu dùng folderId mới.
+        note.folderId = folderId;
+        await commitFolderChanges(state.folders, [note]);
+        renderSidebar(); renderNoteList();
+        showToast('Đã chuyển vào ' + folderName(folderId), 'success');
+      } catch (err) { note.folderId = before; renderFolders(); showToast(err.message, 'error'); }
+    }
+
+    async function deleteFolderAndKeepNotes(id) {
+      if (!state.folders.some(f => f.id === id)) return;
+      const changed = state.notes.filter(n => n.folderId === id);
+      changed.forEach(n => { n.folderId = null; });
+      try { await commitFolderChanges(state.folders.filter(f => f.id !== id), changed); }
+      catch (err) { changed.forEach(n => { n.folderId = id; }); throw err; }
+      if (state.filterType === 'folder' && state.filterFolderId === id) state.filterFolderId = null;
+      renderSidebar(); renderNoteList();
+    }
+
+    function bindFolderEvents() {
+      document.getElementById('btnNewFolder').addEventListener('click', () => openFolderDialog());
+      document.getElementById('btnManageCurrentFolder').addEventListener('click', () => openFolderDialog(state.filterFolderId));
+      document.getElementById('folderForm').addEventListener('submit', e => { e.preventDefault(); saveFolderFromDialog(); });
+      document.getElementById('btnDeleteFolder').addEventListener('click', () => { document.getElementById('folderDeleteWarning').hidden = false; });
+      document.getElementById('btnConfirmDeleteFolder').addEventListener('click', async () => {
+        if (state.folderBusy) return;
+        state.folderBusy = true;
+        try {
+          await deleteFolderAndKeepNotes(state.editingFolderId);
+          document.getElementById('modalFolder').classList.remove('open');
+          document.getElementById('btnNewFolder').focus();
+          showToast('Đã xóa thư mục. Các ghi chú được giữ ở Chưa phân loại.', 'success');
+        } catch (err) { document.getElementById('folderError').textContent = err.message; }
+        finally { state.folderBusy = false; }
+      });
+      document.getElementById('noteFolderSelect').addEventListener('change', e => { const note=getActiveNote(); if(note) moveNoteToFolder(note.id, e.target.value || null); });
+      const nav = document.querySelector('.sidebar-nav');
+      nav.addEventListener('click', e => {
+        const edit=e.target.closest('[data-edit-folder]');
+        if(edit) { openFolderDialog(edit.dataset.editFolder); return; }
+        const button=e.target.closest('[data-folder-id]');
+        if(!button) return;
+        state.filterType='folder'; state.filterFolderId=button.dataset.folderId || null; state.filterTag=null;
+        if (window.innerWidth <= 760) { state.sidebarCollapsed=true; state.noteListCollapsed=false; applyPanelVisibility(); }
+        renderSidebar(); renderNoteList();
+      });
+      const list=document.getElementById('noteListContainer');
+      list.addEventListener('keydown', e => { if((e.key==='Enter' || e.key===' ') && e.target.matches('.note-card')) { e.preventDefault(); e.target.click(); } });
+      list.addEventListener('dragstart', e => {
+        const card=e.target.closest('[data-note-id]'); if(!card) return;
+        e.dataTransfer.setData('application/x-notelab-note',card.dataset.noteId); e.dataTransfer.effectAllowed='move';
+      });
+      nav.addEventListener('dragover', e => {
+        const target=e.target.closest('[data-folder-id]');
+        if(target && Array.from(e.dataTransfer.types).includes('application/x-notelab-note')) { e.preventDefault(); e.dataTransfer.dropEffect='move'; target.classList.add('folder-drop-target'); }
+      });
+      nav.addEventListener('dragleave', e => { const target=e.target.closest('[data-folder-id]'); if(target && !target.contains(e.relatedTarget)) target.classList.remove('folder-drop-target'); });
+      nav.addEventListener('drop', e => {
+        const target=e.target.closest('[data-folder-id]'); if(!target) return;
+        e.preventDefault(); target.classList.remove('folder-drop-target');
+        const noteId=e.dataTransfer.getData('application/x-notelab-note'); if(noteId) moveNoteToFolder(noteId,target.dataset.folderId || null);
+      });
+      const menu=document.getElementById('workspaceOptions');
+      document.addEventListener('click', e => { if(!menu.contains(e.target)) menu.open=false; });
+      menu.addEventListener('click', e => { if(e.target.closest('button') && !e.target.closest('.width-control-group')) menu.open=false; });
+      const modal=document.getElementById('modalFolder');
+      modal.addEventListener('keydown', e => {
+        if(e.key==='Escape') { e.stopPropagation(); modal.classList.remove('open'); document.getElementById('btnNewFolder').focus(); }
+        if(e.key==='Tab') {
+          const fields=Array.from(modal.querySelectorAll('button, input')).filter(el => !el.hidden && el.getClientRects().length);
+          if(e.shiftKey && document.activeElement===fields[0]) { e.preventDefault(); fields[fields.length-1].focus(); }
+          else if(!e.shiftKey && document.activeElement===fields[fields.length-1]) { e.preventDefault(); fields[0].focus(); }
+        }
+      });
+    }
+
     function getActiveNote() {
       return state.notes.find((n) => n.id === state.activeNoteId) || null;
     }
@@ -6152,6 +6519,7 @@ A:: $f_c = \\frac{1}{2\\pi R C}$ (tại đó biên độ suy giảm $-3\\text{ d
       const q = state.searchQuery.trim().toLowerCase();
       return state.notes
         .filter((note) => {
+          if (state.filterType === 'folder' && getNoteFolderId(note) !== state.filterFolderId) return false;
           if (state.filterType === 'pinned' && !note.pinned) return false;
           if (state.filterType === 'tag' && state.filterTag) {
             const hasTag = (note.tags || []).some((t) => t.toLowerCase() === state.filterTag.toLowerCase());
@@ -6202,6 +6570,7 @@ A:: $f_c = \\frac{1}{2\\pi R C}$ (tại đó biên độ suy giảm $-3\\text{ d
        === SECTION: RENDER GIAO DIỆN 3 CỘT ===
        ========================================================================= */
     function renderSidebar() {
+      renderFolders();
       document.getElementById('countAllNotes').textContent = state.notes.length;
       document.getElementById('countPinnedNotes').textContent = state.notes.filter((n) => n.pinned).length;
 
@@ -6245,6 +6614,8 @@ A:: $f_c = \\frac{1}{2\\pi R C}$ (tại đó biên độ suy giảm $-3\\text{ d
       if (state.filterType === 'all') titleEl.textContent = 'Tất cả ghi chú';
       else if (state.filterType === 'pinned') titleEl.textContent = 'Ghi chú đã ghim';
       else if (state.filterType === 'tag') titleEl.textContent = `#${state.filterTag}`;
+      else if (state.filterType === 'folder') titleEl.textContent = folderName(state.filterFolderId);
+      document.getElementById('btnManageCurrentFolder').hidden = state.filterType !== 'folder' || !state.filterFolderId;
 
       subEl.textContent = `${filtered.length} ghi chú${state.searchQuery.trim() ? ` · Lọc theo "${state.searchQuery.trim()}"` : ''}`;
 
@@ -6276,7 +6647,7 @@ A:: $f_c = \\frac{1}{2\\pi R C}$ (tại đó biên độ suy giảm $-3\\text{ d
             .join('');
 
           return `
-            <div class="note-card ${isActive ? 'active' : ''}" data-note-id="${note.id}">
+            <div class="note-card ${isActive ? 'active' : ''}" data-note-id="${escapeHtml(note.id)}" draggable="true" tabindex="0" role="button" aria-label="Mở ghi chú ${escapeHtml(note.title || 'Không tiêu đề')}">
               <div class="note-card-header">
                 <div class="note-card-title">${highlightedTitle}</div>
                 ${note.pinned ? '<span class="note-card-pin" title="Đã ghim">Ghim</span>' : ''}
@@ -6317,6 +6688,7 @@ A:: $f_c = \\frac{1}{2\\pi R C}$ (tại đó biên độ suy giảm $-3\\text{ d
       }
 
       document.getElementById('btnPinNote').textContent = note.pinned ? 'Bỏ ghim' : 'Ghim';
+      renderNoteFolderSelect(note);
       renderActiveNoteTags(note);
       updateWordCount(note.content || '');
       await renderPreviewAndBacklinks(note);
@@ -6468,6 +6840,7 @@ A:: $f_c = \\frac{1}{2\\pi R C}$ (tại đó biên độ suy giảm $-3\\text{ d
         id: generateId('note'),
         title: initialTitle,
         content: initialContent || `# ${initialTitle}\n\n`,
+        folderId: state.filterType === 'folder' ? state.filterFolderId : null,
         tags: state.filterType === 'tag' && state.filterTag ? [state.filterTag] : [],
         pinned: false,
         createdAt: now,
@@ -6480,6 +6853,7 @@ A:: $f_c = \\frac{1}{2\\pi R C}$ (tại đó biên độ suy giảm $-3\\text{ d
         await idbPut('notes', newNote);
         state.notes.unshift(newNote);
         state.activeNoteId = newNote.id;
+        if (window.innerWidth <= 760) { state.sidebarCollapsed=true; state.noteListCollapsed=true; applyPanelVisibility(); }
         renderSidebar();
         renderNoteList();
         await renderActiveWorkspace();
@@ -6706,6 +7080,8 @@ A:: $f_c = \\frac{1}{2\\pi R C}$ (tại đó biên độ suy giảm $-3\\text{ d
           phase: 2,
           exportedAt: now,
           fontSettings: fontMeta ? fontMeta.value : state.fontSettings,
+          folders: state.folders,
+          schemaVersion: 3,
           notes,
           versions,
           images: encodedImages
@@ -6735,6 +7111,7 @@ A:: $f_c = \\frac{1}{2\\pi R C}$ (tại đó biên độ suy giảm $-3\\text{ d
     async function applyImportedBackup(mode = 'merge') {
       const data = state.pendingImportData;
       if (!data) return;
+      try { normalizeFolders(data.folders); } catch (err) { showToast(err.message, 'error'); return; }
 
       try {
         if (mode === 'overwrite') {
@@ -6761,6 +7138,10 @@ A:: $f_c = \\frac{1}{2\\pi R C}$ (tại đó biên độ suy giảm $-3\\text{ d
           }
         }
 
+        const importedFolders = normalizeFolders(data.folders);
+        const mergedFolders = mode === 'overwrite' ? importedFolders : Array.from(new Map([...state.folders, ...importedFolders].map(f => [f.id, f])).values());
+        await commitFolderChanges(mergedFolders);
+
         // Khôi phục cài đặt font nếu trong file sao lưu có mục fontSettings (tương thích ngược)
         if (data.fontSettings && typeof data.fontSettings === 'object') {
           state.fontSettings = normalizeFontSettings(data.fontSettings);
@@ -6769,6 +7150,7 @@ A:: $f_c = \\frac{1}{2\\pi R C}$ (tại đó biên độ suy giảm $-3\\text{ d
 
         await migrateLegacySampleNotes();
         state.notes = await idbGetAll('notes');
+        if (state.filterType === 'folder' && state.filterFolderId && !state.folders.some(f => f.id === state.filterFolderId)) { state.filterType = 'all'; state.filterFolderId = null; }
         const sorted = getFilteredNotes();
         state.activeNoteId = sorted[0]?.id || null;
         state.pendingImportData = null;
@@ -6835,7 +7217,7 @@ A:: $f_c = \\frac{1}{2\\pi R C}$ (tại đó biên độ suy giảm $-3\\text{ d
     };
 
     function getDefaultFontGroup(groupKey) {
-      if (groupKey === 'ui') return { preset: 'Times New Roman', custom: '', size: 15, lh: 1.55 };
+      if (groupKey === 'ui') return { preset: 'system', custom: '', size: 15, lh: 1.55 };
       if (groupKey === 'editor') return { preset: 'Times New Roman', custom: '', size: 17, lh: 1.7 };
       if (groupKey === 'preview') {
         return {
@@ -7378,6 +7760,7 @@ A:: $f_c = \\frac{1}{2\\pi R C}$ (tại đó biên độ suy giảm $-3\\text{ d
         const card = e.target.closest('[data-note-id]');
         if (!card) return;
         state.activeNoteId = card.dataset.noteId;
+        if (window.innerWidth <= 760) { state.sidebarCollapsed=true; state.noteListCollapsed=true; applyPanelVisibility(); }
         renderNoteList();
         await renderActiveWorkspace();
       });
@@ -7585,9 +7968,10 @@ A:: $f_c = \\frac{1}{2\\pi R C}$ (tại đó biên độ suy giảm $-3\\text{ d
             if (!Array.isArray(parsed.notes)) {
               throw new Error('Cấu trúc file .json không hợp lệ');
             }
+            normalizeFolders(parsed.folders);
             state.pendingImportData = parsed;
             document.getElementById('importBackupSummary').textContent =
-              `Tìm thấy ${parsed.notes.length} ghi chú, ${(parsed.images || []).length} hình ảnh và ${(parsed.versions || []).length} bản lịch sử trong file sao lưu.`;
+              `Tìm thấy ${parsed.notes.length} ghi chú, ${(parsed.folders || []).length} thư mục, ${(parsed.images || []).length} hình ảnh và ${(parsed.versions || []).length} bản lịch sử trong file sao lưu.`;
             document.getElementById('modalImportBackup').classList.add('open');
           } catch (err) {
             showToast('File sao lưu không hợp lệ: ' + err.message, 'error');
@@ -7781,13 +8165,17 @@ A:: $f_c = \\frac{1}{2\\pi R C}$ (tại đó biên độ suy giảm $-3\\text{ d
       initLayoutPreferences();
       initDraggableResizers();
       bindAllEvents();
+      bindFolderEvents();
 
       try {
         state.db = await openDatabase();
+        const foldersMeta = await idbGet('meta', 'folders');
+        state.folders = normalizeFolders(foldersMeta?.value);
         await loadFontSettingsFromIdb();
         await seedInitialNotesIfEmpty();
         await migrateLegacySampleNotes();
         state.notes = await idbGetAll('notes');
+        if (state.filterType === 'folder' && state.filterFolderId && !state.folders.some(f => f.id === state.filterFolderId)) { state.filterType = 'all'; state.filterFolderId = null; }
         const sorted = getFilteredNotes();
         state.activeNoteId = sorted[0]?.id || null;
 
