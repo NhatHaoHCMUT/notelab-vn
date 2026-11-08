@@ -29,7 +29,15 @@ Nếu `git apply --check` báo xung đột, repository đã khác bản gốc n�
 - Mindmap được lưu bằng JSON trong khối Markdown `mindmap`, nên đi kèm xuất/nhập sao lưu, xuất Markdown và lịch sử ghi chú. Khối xem trước có nút xuất SVG/PNG như mạch và waveform. Giới hạn 500 node, 2000 liên kết, 120 ký tự mỗi tên; node hiển thị hai dòng, tên đầy đủ ở ô chỉnh và tooltip.
 - Topbar chia nhóm điều hướng, chèn khối, chế độ xem và công cụ. Thư mục/tag nằm ở hàng riêng. Bố cục tự xuống dòng trên màn hình nhỏ, không bỏ nút chức năng.
 - **Ctrl+Alt+B**: ẩn/hiện Tab; **Ctrl+Alt+L**: ẩn/hiện danh sách. Trên macOS dùng Command thay Ctrl. Không bắt các phím tắt toàn cục khi hộp thoại đang mở. Ctrl+B được trả lại cho thao tác soạn thảo/trình duyệt; Ctrl+\\ vẫn là phím tắt Tab cũ.
-- Đổi tên thư mục: bấm **···** cạnh thư mục hoặc nhấp đúp tên thư mục. Nút luôn hiển thị, tên hộp thoại rõ ràng. Giữ nguyên ID thư mục và liên kết ghi chú. **Chưa phân loại** là mục hệ thống, không phải thư mục có thể đổi tên.
+- Đổi tên thư mục: bấm **Đổi tên** cạnh ô chọn thư mục trong hàng Thư mục/Tags, **···** ở sidebar hoặc nhấp đúp tên thư mục. Giữ nguyên ID thư mục và liên kết ghi chú. Với **Chưa phân loại**, hộp thoại giải thích việc tạo thư mục có tên mới và chuyển toàn bộ ghi chú chưa phân loại vào đó; mục hệ thống Chưa phân loại vẫn tồn tại để nhận ghi chú mới.
+
+### Sửa bổ sung v2
+
+- Sửa nhấp đúp đổi tên bị mất sự kiện khi danh sách dựng lại sau lần nhấp đầu.
+- Thêm nút Đổi tên trực tiếp ở hàng Thư mục/Tags, sử dụng được cả khi sidebar ẩn.
+- Thêm viền/nền cho Ẩn Tab và Ẩn DS giống các nút chèn khối.
+- Thêm đường kẻ ngang giữa hàng công cụ và hàng Thư mục/Tags.
+- Kiểm thử bổ sung: đổi tên từ Chưa phân loại, giữ nguyên nội dung ghi chú, đổi tên thư mục thật vẫn giữ ID, tải lại vẫn còn tên mới, nhấp đúp mở đúng thư mục; kiểm tra viền và bố cục mobile.
 
 ## Dữ liệu và giới hạn
 

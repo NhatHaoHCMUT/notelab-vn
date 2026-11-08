@@ -1,0 +1,54 @@
+const {chromium}=require('playwright');
+const fs=require('fs'),http=require('http'),path=require('path'),assert=require('assert/strict');
+const base=path.resolve(__dirname,'..');
+fs.mkdirSync(path.join(base,'test-results'),{recursive:true});
+const server=http.createServer((req,res)=>{let p=path.join(base,decodeURIComponent(req.url.split('?')[0]));if(req.url==='/')p=path.join(base,'index.html');if(!p.startsWith(base)){res.writeHead(403).end();return;}fs.readFile(p,(e,b)=>{if(e){res.writeHead(404).end();return;}res.setHeader('Content-Type',p.endsWith('.js')?'application/javascript':p.endsWith('.css')?'text/css':'text/html');res.end(b);});});
+(async()=>{await new Promise(r=>server.listen(8765,'127.0.0.1',r));const browser=await chromium.launch({headless:true,executablePath:process.env.CHROME_PATH || undefined});try{
+const page=await browser.newPage({viewport:{width:1600,height:1000}}), errors=[];page.on('pageerror',e=>errors.push(e.message));
+await page.goto('http://127.0.0.1:8765/',{waitUntil:'networkidle'});
+await page.waitForFunction(()=>typeof state!=='undefined' && state.db && state.notes.length);
+console.log('Loaded',await page.evaluate(()=>({notes:state.notes.length,marked:!!window.marked,purify:!!window.DOMPurify})));
+assert.equal(await page.locator('.brand-mark').innerText(),'Note');
+await page.locator('[data-open-appearance]').first().click();await page.locator('[data-hex="background"]').fill('#102030');await page.locator('[data-hex="accent"]').fill('#abcdef');
+assert.equal(await page.evaluate(()=>getComputedStyle(document.documentElement).getPropertyValue('--bg-editor').trim()),'#102030');
+await page.locator('[data-rgb="accent-0"]').fill('300');assert.match(await page.locator('.appearance-error').innerText(),/255/);
+await page.keyboard.press('Escape');await page.reload({waitUntil:'networkidle'});
+assert.equal(await page.evaluate(()=>getComputedStyle(document.documentElement).getPropertyValue('--accent').trim()),'#abcdef');
+let b=await page.evaluate(()=>state.sidebarCollapsed);await page.keyboard.press('Control+Alt+b');assert.equal(await page.evaluate(()=>state.sidebarCollapsed),!b);await page.keyboard.press('Control+Alt+b');
+b=await page.evaluate(()=>state.noteListCollapsed);await page.keyboard.press('Control+Alt+l');assert.equal(await page.evaluate(()=>state.noteListCollapsed),!b);await page.keyboard.press('Control+Alt+l');
+const originalNotes=await page.evaluate(()=>state.notes.map(n=>({id:n.id,content:n.content})));
+await page.locator('#btnRenameNoteFolder').click();await page.locator('#folderNameInput').fill('Vật lý');await page.locator('#btnSaveFolder').click();await page.waitForFunction(()=>state.folders.some(f=>f.name==='Vật lý'));
+const renamedId=await page.evaluate(()=>state.folders.find(f=>f.name==='Vật lý').id);
+assert.ok(await page.evaluate(id=>state.notes.every(n=>n.folderId===id),renamedId));
+assert.deepEqual(await page.evaluate(()=>state.notes.map(n=>({id:n.id,content:n.content}))),originalNotes);
+await page.locator('#btnRenameNoteFolder').click();await page.locator('#folderNameInput').fill('Vật lý 2');await page.locator('#btnSaveFolder').click();await page.waitForFunction(()=>state.folders.some(f=>f.name==='Vật lý 2'));
+assert.equal(await page.evaluate(()=>state.folders.find(f=>f.name==='Vật lý 2').id),renamedId);
+await page.reload({waitUntil:'networkidle'});await page.waitForFunction(()=>state.folders.some(f=>f.name==='Vật lý 2'));
+await page.locator(`[data-folder-id="${renamedId}"]`).dblclick();await page.locator('#modalFolder.open').waitFor();assert.equal(await page.locator('#folderNameInput').inputValue(),'Vật lý 2');await page.locator('#modalFolder [data-close-modal]').first().click();
+const borders=await page.evaluate(()=>['#btnToggleSidebarTop','#btnToggleNoteListTop','.workspace-toolbar'].map(s=>{const c=getComputedStyle(document.querySelector(s));return [c.borderBottomWidth,c.borderBottomStyle,c.borderBottomColor];}));assert.ok(borders.every(b=>b[0]==='1px'&&b[1]==='solid'&&b[2]!=='rgba(0, 0, 0, 0)'));
+await page.locator('#btnNewFolder').click();await page.locator('#folderNameInput').fill('Kiểm thử');await page.locator('#btnSaveFolder').click();await page.waitForFunction(()=>state.folders.some(f=>f.name==='Kiểm thử'));
+await page.locator('[data-edit-folder]').first().click();await page.locator('#folderNameInput').fill('Đã đổi tên');await page.locator('#btnSaveFolder').click();await page.waitForFunction(()=>state.folders.some(f=>f.name==='Đã đổi tên'));
+await page.evaluate(()=>createNewNote());await page.waitForFunction(()=>!!getActiveNote());
+await page.locator('#btnInsertMindmap').click();await page.locator('.mindmap-canvas').waitFor();assert.match(await page.locator('#blockEditorModalTitle').innerText(),/Mindmap/);
+await page.locator('[data-mm="add"]').click();await page.locator('[data-mm="text"]').fill('Node kiểm thử');
+await page.locator('[data-mm="link"]').click();await page.locator('[data-mm="select"]').selectOption('root');
+let d=await page.evaluate(()=>JSON.parse(state.blockEditor.currentCode));assert.equal(d.nodes.length,3);assert.equal(d.links.length,2);
+const rect=page.locator('.mindmap-canvas [data-node="root"] rect');let box=await rect.boundingBox();await page.mouse.move(box.x+50,box.y+20);await page.mouse.down();await page.mouse.move(box.x+100,box.y+60,{steps:5});await page.mouse.up();
+d=await page.evaluate(()=>JSON.parse(state.blockEditor.currentCode));assert.notEqual(d.nodes[0].x,0);
+const old=await page.locator('.mindmap-canvas').getAttribute('viewBox');await page.locator('[data-mm="in"]').click();assert.notEqual(await page.locator('.mindmap-canvas').getAttribute('viewBox'),old);
+const panBefore=await page.locator('.mindmap-canvas').getAttribute('viewBox');const canvas=await page.locator('.mindmap-canvas').boundingBox();await page.mouse.move(canvas.x+10,canvas.y+10);await page.mouse.down();await page.mouse.move(canvas.x+40,canvas.y+40);await page.mouse.up();assert.notEqual(await page.locator('.mindmap-canvas').getAttribute('viewBox'),panBefore);
+await page.locator('.mindmap-canvas [data-edge="0"]').dispatchEvent('pointerdown',{button:0});await page.locator('[data-mm="delete"]').click();assert.equal(await page.evaluate(()=>JSON.parse(state.blockEditor.currentCode).links.length),1);
+await page.locator('#btnSaveCloseBlockEditor').click();await page.waitForTimeout(1500);assert.equal(await page.locator('#markdownPreview [data-block-type="mindmap"] svg').count(),1);
+for(const format of ['svg','png']) {const promise=page.waitForEvent('download');await page.locator(`#markdownPreview [data-block-type="mindmap"] [data-block-action="export-${format}"]`).click();const download=await promise;assert.ok(download.suggestedFilename().endsWith('.'+format));assert.equal(await download.failure(),null);}
+const content=await page.evaluate(()=>getActiveNote().content), id=await page.evaluate(()=>getActiveNote().id);
+await page.reload({waitUntil:'networkidle'});await page.waitForFunction(id=>state.notes.some(n=>n.id===id),id);assert.equal(await page.evaluate(id=>state.notes.find(n=>n.id===id).content,id),content);
+// Verify original renderers and malformed mindmaps without changing user data.
+assert.ok(await page.evaluate(()=>circuitEngine.renderStaticSvg(DEFAULT_CIRCUIT_TEMPLATE).includes('<svg')));
+assert.ok(await page.evaluate(()=>waveEngine.renderStaticSvg(DEFAULT_WAVE_TEMPLATE).includes('<svg')));
+assert.ok(await page.evaluate(()=>{try{mindmapEngine.parse('{"v":1,"nodes":[],"links":[{"from":"x","to":"y"}]}');return false;}catch{return true;}}));
+await page.evaluate(()=>{applyTheme('dark');document.querySelector('[data-open-appearance]').click();});await page.getByRole('button',{name:'Lá',exact:true}).click();await page.keyboard.press('Escape');
+await page.screenshot({path:path.join(base,'test-results/desktop.png'),fullPage:true});
+await page.setViewportSize({width:390,height:844});await page.reload({waitUntil:'networkidle'});await page.screenshot({path:path.join(base,'test-results/mobile.png'),fullPage:true});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+assert.deepEqual(errors,[]);console.log('PASS: logo, theme RGB/HEX persistence, shortcuts, folder create/rename, mindmap add/link/drag/zoom/save/reload, circuit/wave rendering, validation, mobile overflow, no page errors.');
+}finally{await browser.close();server.close();}})().catch(e=>{console.error(e);server.close();process.exitCode=1;});
+
