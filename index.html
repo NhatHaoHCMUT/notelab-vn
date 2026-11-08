@@ -30,6 +30,7 @@
   <script src="assets/js/font-cache.js"></script>
 
   <link rel="stylesheet" href="assets/css/app.css" />
+  <link rel="stylesheet" href="assets/css/upgrade.css" />
 </head>
 <body>
   <div id="assetLoadWarning" role="alert" hidden style="position:fixed;z-index:3000;inset:12px 12px auto;padding:16px;border:1px solid #b45309;border-radius:8px;background:#fff7ed;color:#7c2d12;font:14px/1.6 system-ui,sans-serif;">
@@ -73,13 +74,13 @@
       <aside id="sidebarPane" class="sidebar">
         <div class="sidebar-header">
           <div class="brand">
-            <span class="brand-mark" aria-hidden="true">N<span>.</span></span>
+            <span class="brand-mark" aria-hidden="true">Note</span>
             <span>NoteLab VN<small>KHÔNG GIAN HỌC TẬP</small></span>
           </div>
           <div class="sidebar-header-actions">
-            <button id="btnOpenFontSettingsSidebar" class="btn btn-sm" title="Tùy chỉnh phông chữ (Aa)">Aa</button>
+            <button data-open-appearance class="btn btn-sm" title="Màu nền, highlight và phím tắt">Màu</button><button id="btnOpenFontSettingsSidebar" class="btn btn-sm" title="Tùy chỉnh phông chữ (Aa)">Aa</button>
             <button id="btnThemeToggle" class="btn btn-sm" title="Chuyển chế độ Sáng / Tối">Sáng</button>
-            <button id="btnCollapseSidebar" class="btn btn-sm" title="Ẩn thanh Tab (Ctrl+B)">Ẩn</button>
+            <button id="btnCollapseSidebar" class="btn btn-sm" title="Ẩn thanh Tab (Ctrl+Alt+B)">Ẩn</button>
           </div>
         </div>
 
@@ -172,16 +173,17 @@
           <!-- Thanh công cụ trên -->
           <div class="workspace-toolbar">
             <div class="toolbar-left-group">
-              <button id="btnToggleSidebarTop" class="btn btn-sm" title="Ẩn / Hiện thanh Tab bên trái (Ctrl+B)">Tab</button>
-              <button id="btnToggleNoteListTop" class="btn btn-sm" title="Ẩn / Hiện cột Danh sách ghi chú">Danh sách</button>
+              <button id="btnToggleSidebarTop" class="btn btn-sm" title="Ẩn / Hiện thanh Tab bên trái (Ctrl+Alt+B)">Tab</button>
+              <button id="btnToggleNoteListTop" class="btn btn-sm" title="Ẩn / Hiện cột Danh sách ghi chú (Ctrl+Alt+L)">Danh sách</button>
 
             </div>
 
                 <div class="toolbar-actions">
               <!-- Chèn nhanh khối Sơ đồ mạch & Waveform tại con trỏ -->
-              <button id="btnInsertCircuit" class="btn btn-sm" title="Chèn khối sơ đồ mạch tại vị trí con trỏ và mở trình vẽ">+ Chèn sơ đồ mạch</button>
-              <button id="btnInsertWave" class="btn btn-sm" title="Chèn khối giản đồ xung (Waveform) tại vị trí con trỏ và mở trình soạn">+ Chèn waveform</button>
-              <span id="saveStatusBadge" class="save-status saved">Đã lưu</span>
+              <div class="toolbar-insert-group"><button id="btnInsertMindmap" class="btn btn-sm" title="Chèn sơ đồ tư duy">+ Mindmap</button>
+              <button id="btnInsertCircuit" class="btn btn-sm" title="Chèn khối sơ đồ mạch tại vị trí con trỏ và mở trình vẽ">+ Mạch</button>
+              <button id="btnInsertWave" class="btn btn-sm" title="Chèn khối giản đồ xung (Waveform) tại vị trí con trỏ và mở trình soạn">+ Waveform</button>
+              </div><span id="saveStatusBadge" class="save-status saved">Đã lưu</span>
 
               <div class="mode-switcher" title="Đổi chế độ (Ctrl+E)">
                 <button class="mode-btn" data-mode="edit">Soạn</button>
@@ -191,7 +193,7 @@
 
               <details class="workspace-options" id="workspaceOptions">
                 <summary class="btn btn-sm">Công cụ <span aria-hidden="true">⌄</span></summary>
-                <div class="workspace-menu">              <button id="btnOpenFontSettingsToolbar" class="btn btn-sm" title="Tùy chỉnh chữ toàn ứng dụng">Aa Chữ</button>
+                <div class="workspace-menu">              <button data-open-appearance class="btn btn-sm">Màu & phím tắt</button><button id="btnOpenFontSettingsToolbar" class="btn btn-sm" title="Tùy chỉnh chữ toàn ứng dụng">Aa Chữ</button>
 
               <!-- Tùy chỉnh độ rộng phần Take Note -->
               <div class="width-control-group" title="Tùy chỉnh độ rộng vùng soạn thảo và đọc bài">
@@ -559,6 +561,8 @@
 
   <div id="toastContainer" class="toast-container"></div>
 
+  <script src="assets/js/mindmap.js"></script>
+  <script src="assets/js/appearance.js"></script>
   <script src="assets/js/app.js" onerror="document.getElementById('assetLoadWarning').hidden=false"></script>
 </body>
 </html>

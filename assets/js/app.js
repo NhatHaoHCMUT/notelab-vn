@@ -2796,7 +2796,7 @@
         const val = ta.value;
         onChangeCallback(val);
         try {
-          const engine = blockType === 'wave' ? waveEngine : circuitEngine;
+          const engine = blockType === 'mindmap' ? mindmapEngine : blockType === 'wave' ? waveEngine : circuitEngine;
           prev.innerHTML = engine.renderStaticSvg(val);
         } catch (err) {
           const lineInfo = err && err.line ? `Dòng ${err.line}: ` : '';
@@ -2823,7 +2823,7 @@
         bodyHtml = svgBlockCache.get(cacheKey);
       } else {
         try {
-          const engine = blockType === 'wave' ? waveEngine : circuitEngine;
+          const engine = blockType === 'mindmap' ? mindmapEngine : blockType === 'wave' ? waveEngine : circuitEngine;
           const svgMarkup = engine.renderStaticSvg(rawCode);
           bodyHtml = `<div class="special-block-svg-wrap">${svgMarkup}</div>`;
         } catch (err) {
@@ -2862,6 +2862,7 @@
     }
 
     const blockRenderers = {
+      mindmap: (code, blockId) => renderSpecialBlockWithCache('mindmap', 'Sơ đồ tư duy', code, blockId),
       circuit: function (code, blockId) {
         return renderSpecialBlockWithCache('circuit', 'Sơ đồ mạch điện / mạch số', code, blockId);
       },
@@ -3760,7 +3761,7 @@ A:: $f_c = \\frac{1}{2\\pi R C}$ (tại đó biên độ suy giảm $-3\\text{ d
       document.getElementById('navUnfiledNotes').classList.toggle('active', state.filterType === 'folder' && state.filterFolderId === null);
       document.getElementById('sidebarFolderList').innerHTML = [...state.folders]
         .sort((a,b) => a.name.localeCompare(b.name, 'vi'))
-        .map(f => `<div class="folder-row"><button class="nav-item ${state.filterType === 'folder' && state.filterFolderId === f.id ? 'active' : ''}" data-folder-id="${escapeHtml(f.id)}" title="${escapeHtml(f.name)} · Có thể thả ghi chú vào đây"><span class="nav-item-left"><span class="folder-symbol" aria-hidden="true"></span><span class="folder-name">${escapeHtml(f.name)}</span></span><span class="nav-count">${count(f.id)}</span></button><button class="folder-edit" data-edit-folder="${escapeHtml(f.id)}" title="Quản lý thư mục ${escapeHtml(f.name)}" aria-label="Quản lý thư mục ${escapeHtml(f.name)}">···</button></div>`).join('');
+        .map(f => `<div class="folder-row"><button class="nav-item ${state.filterType === 'folder' && state.filterFolderId === f.id ? 'active' : ''}" data-folder-id="${escapeHtml(f.id)}" title="${escapeHtml(f.name)} · Có thể thả ghi chú vào đây"><span class="nav-item-left"><span class="folder-symbol" aria-hidden="true"></span><span class="folder-name">${escapeHtml(f.name)}</span></span><span class="nav-count">${count(f.id)}</span></button><button class="folder-edit" data-edit-folder="${escapeHtml(f.id)}" title="Đổi tên / quản lý thư mục ${escapeHtml(f.name)}" aria-label="Đổi tên / quản lý thư mục ${escapeHtml(f.name)}">···</button></div>`).join('');
       const note = getActiveNote();
       if (note) renderNoteFolderSelect(note);
     }
@@ -3775,7 +3776,7 @@ A:: $f_c = \\frac{1}{2\\pi R C}$ (tại đó biên độ suy giảm $-3\\text{ d
     function openFolderDialog(id = null) {
       const folder = state.folders.find(f => f.id === id);
       state.editingFolderId = folder?.id || null;
-      document.getElementById('folderModalTitle').textContent = folder ? 'Quản lý thư mục' : 'Tạo thư mục';
+      document.getElementById('folderModalTitle').textContent = folder ? 'Đổi tên thư mục' : 'Tạo thư mục';
       document.getElementById('btnSaveFolder').textContent = folder ? 'Lưu thay đổi' : 'Tạo thư mục';
       document.getElementById('folderNameInput').value = folder?.name || '';
       document.getElementById('folderError').textContent = '';
@@ -3783,6 +3784,7 @@ A:: $f_c = \\frac{1}{2\\pi R C}$ (tại đó biên độ suy giảm $-3\\text{ d
       document.getElementById('folderDeleteWarning').hidden = true;
       document.getElementById('modalFolder').classList.add('open');
       document.getElementById('folderNameInput').focus();
+      document.getElementById('folderNameInput').select();
     }
 
     async function saveFolderFromDialog() {
@@ -3832,6 +3834,7 @@ A:: $f_c = \\frac{1}{2\\pi R C}$ (tại đó biên độ suy giảm $-3\\text{ d
     }
 
     function bindFolderEvents() {
+      document.getElementById('sidebarFolderList').addEventListener('dblclick', e => { const row=e.target.closest('[data-folder-id]'); if(row) openFolderDialog(row.dataset.folderId); });
       document.getElementById('btnNewFolder').addEventListener('click', () => openFolderDialog());
       document.getElementById('btnManageCurrentFolder').addEventListener('click', () => openFolderDialog(state.filterFolderId));
       document.getElementById('folderForm').addEventListener('submit', e => { e.preventDefault(); saveFolderFromDialog(); });
@@ -5003,7 +5006,7 @@ A:: $f_c = \\frac{1}{2\\pi R C}$ (tại đó biên độ suy giảm $-3\\text{ d
       const workspaceEl = document.getElementById('blockEditorWorkspace');
 
       titleEl.textContent =
-        blockType === 'circuit'
+        blockType === 'mindmap' ? `Trình vẽ Mindmap (Khối #${blockIndex + 1})` : blockType === 'circuit'
           ? `Trình vẽ Sơ đồ mạch (Khối #${blockIndex + 1})`
           : `Trình soạn Giản đồ xung Waveform (Khối #${blockIndex + 1})`;
       badgeEl.textContent = blockType.toUpperCase();
@@ -5015,7 +5018,7 @@ A:: $f_c = \\frac{1}{2\\pi R C}$ (tại đó biên độ suy giảm $-3\\text{ d
         state.blockEditor.dirty = updatedCode.trim() !== state.blockEditor.initialCode.trim();
       };
 
-      const engine = blockType === 'wave' ? waveEngine : circuitEngine;
+      const engine = blockType === 'mindmap' ? mindmapEngine : blockType === 'wave' ? waveEngine : circuitEngine;
       engine.mountEditor(workspaceEl, existingCode, onCodeChange, toolbarSlot);
 
       document.getElementById('modalBlockEditor').classList.add('open');
@@ -5071,7 +5074,7 @@ A:: $f_c = \\frac{1}{2\\pi R C}$ (tại đó biên độ suy giảm $-3\\text{ d
       const matchesBefore = beforeText.match(regex);
       const newBlockIndex = matchesBefore ? matchesBefore.length : 0;
 
-      const templateContent = blockType === 'circuit' ? DEFAULT_CIRCUIT_TEMPLATE : DEFAULT_WAVE_TEMPLATE;
+      const templateContent = blockType === 'mindmap' ? mindmapEngine.template : blockType === 'circuit' ? DEFAULT_CIRCUIT_TEMPLATE : DEFAULT_WAVE_TEMPLATE;
       const prefixNewline = startPos > 0 && !beforeText.endsWith('\n') ? '\n\n' : '';
       const snippet = `${prefixNewline}\`\`\`${blockType}\n${templateContent}\n\`\`\`\n`;
 
@@ -5495,9 +5498,16 @@ A:: $f_c = \\frac{1}{2\\pi R C}$ (tại đó biên độ suy giảm $-3\\text{ d
         });
       });
 
-      // Phím tắt toàn cục: Ctrl+N, Ctrl+K, Ctrl+E, Ctrl+B (Ẩn/Hiện Tab)
+      // Ctrl+Alt+B: Tab; Ctrl+Alt+L: danh sách; không chiếm Ctrl+B khi soạn thảo.
       window.addEventListener('keydown', (e) => {
         const isMod = e.ctrlKey || e.metaKey;
+        if (e.defaultPrevented || e.isComposing || document.querySelector('.modal-backdrop.open, dialog[open]')) return;
+        if (isMod && e.altKey && ['b','l'].includes(e.key.toLowerCase())) {
+          e.preventDefault();
+          if (e.key.toLowerCase() === 'b') toggleSidebarPanel(); else toggleNoteListPanel();
+          return;
+        }
+        if (e.altKey || e.shiftKey) return;
         if (isMod && e.key.toLowerCase() === 'k') {
           e.preventDefault();
           if (state.sidebarCollapsed) {
@@ -5512,7 +5522,7 @@ A:: $f_c = \\frac{1}{2\\pi R C}$ (tại đó biên độ suy giảm $-3\\text{ d
         } else if (isMod && e.key.toLowerCase() === 'n') {
           e.preventDefault();
           createNewNote();
-        } else if (isMod && (e.key.toLowerCase() === 'b' || e.key === '\\')) {
+        } else if (isMod && e.key === '\\') {
           e.preventDefault();
           toggleSidebarPanel();
         }
@@ -5563,6 +5573,7 @@ A:: $f_c = \\frac{1}{2\\pi R C}$ (tại đó biên độ suy giảm $-3\\text{ d
       document.getElementById('btnToggleFullWidth').addEventListener('click', syncToolbarWidthToFontSettings);
 
       // Sự kiện nút "Chèn sơ đồ mạch" và "Chèn waveform" trên thanh công cụ
+      document.getElementById('btnInsertMindmap').addEventListener('click', () => insertSpecialBlockAtCursor('mindmap'));
       document.getElementById('btnInsertCircuit').addEventListener('click', () => insertSpecialBlockAtCursor('circuit'));
       document.getElementById('btnInsertWave').addEventListener('click', () => insertSpecialBlockAtCursor('wave'));
 
